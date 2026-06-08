@@ -163,6 +163,19 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
     .pagination button { padding: 6px 14px; background: #21262d; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; font-size: 13px; cursor: pointer; }
     .pagination button:hover { background: #30363d; }
     .pagination button:disabled { opacity: 0.4; cursor: default; }
+    .filename-link { color: #58a6ff; cursor: pointer; text-decoration: underline; }
+    .filename-link:hover { color: #79c0ff; }
+    .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 100; justify-content: center; align-items: center; }
+    .modal-overlay.show { display: flex; }
+    .modal { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 24px; max-width: 480px; width: 90%; }
+    .modal h3 { font-size: 16px; color: #f0f6fc; margin-bottom: 16px; }
+    .modal dl { display: grid; grid-template-columns: 100px 1fr; gap: 8px 12px; font-size: 13px; }
+    .modal dt { color: #8b949e; text-align: right; }
+    .modal dd { color: #c9d1d9; word-break: break-all; }
+    .modal .modal-actions { margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end; }
+    .modal .btn { padding: 6px 14px; border: none; border-radius: 4px; font-size: 13px; cursor: pointer; }
+    .modal .btn-primary { background: #238636; color: #fff; }
+    .modal .btn-secondary { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; }
   </style>
 </head>
 <body>
@@ -201,6 +214,23 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       </tbody>
     </table>
     <div class="pagination" id="pagination"></div>
+  </div>
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal">
+      <h3 id="modalTitle">파일 상세 정보</h3>
+      <dl>
+        <dt>파일 ID</dt><dd id="modalId">-</dd>
+        <dt>파일명</dt><dd id="modalName">-</dd>
+        <dt>MIME 타입</dt><dd id="modalType">-</dd>
+        <dt>파일 크기</dt><dd id="modalSize">-</dd>
+        <dt>업로드</dt><dd id="modalUploaded">-</dd>
+        <dt>만료 예정</dt><dd id="modalExpire">-</dd>
+      </dl>
+      <div class="modal-actions">
+        <button class="btn btn-primary" id="modalCopyBtn">다운로드 URL 복사</button>
+        <button class="btn btn-secondary" onclick="closeModal()">닫기</button>
+      </div>
+    </div>
   </div>
   <script>
     var ADMIN_TOKEN = ${JSON.stringify(token)};
@@ -261,7 +291,7 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
         var safeName = JSON.stringify(f.originalFilename).replace(/'/g, '&#39;');
         var safeId = JSON.stringify(f.id).replace(/'/g, '&#39;');
         return '<tr>' +
-          '<td>' + esc(f.originalFilename) + '</td>' +
+          '<td><span class="filename-link" onclick=\\'showFileInfo(' + safeId + ')\\'">' + esc(f.originalFilename) + '</span></td>' +
           '<td>' + formatSize(f.size) + '</td>' +
           '<td>' + formatTime(f.uploadedAt) + '</td>' +
           '<td>' + formatTime(f.expireAt) + '</td>' +
@@ -325,6 +355,47 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
         prompt('아래 URL을 복사하세요:', url);
       });
     }
+
+    var currentFileId = null;
+
+    async function showFileInfo(id) {
+      currentFileId = id;
+      document.getElementById('modalOverlay').classList.add('show');
+      document.getElementById('modalId').textContent = id;
+      document.getElementById('modalName').textContent = '불러오는 중...';
+      document.getElementById('modalType').textContent = '-';
+      document.getElementById('modalSize').textContent = '-';
+      document.getElementById('modalUploaded').textContent = '-';
+      document.getElementById('modalExpire').textContent = '-';
+
+      try {
+        var res = await api('/api/files/' + id + '/info');
+        var data = await res.json();
+        if (data.success && data.data) {
+          document.getElementById('modalName').textContent = data.data.originalFilename;
+          document.getElementById('modalType').textContent = data.data.contentType || 'application/octet-stream';
+          document.getElementById('modalSize').textContent = formatSize(data.data.size);
+          document.getElementById('modalUploaded').textContent = formatTime(data.data.uploadedAt);
+          document.getElementById('modalExpire').textContent = formatTime(data.data.expireAt);
+        } else {
+          document.getElementById('modalName').textContent = '오류: ' + (data.error && data.error.message || '');
+        }
+      } catch (e) {
+        document.getElementById('modalName').textContent = '요청 실패';
+      }
+    }
+
+    function closeModal() {
+      document.getElementById('modalOverlay').classList.remove('show');
+    }
+
+    document.getElementById('modalCopyBtn').addEventListener('click', function() {
+      if (currentFileId) copyUrl(currentFileId, document.getElementById('modalName').textContent);
+    });
+
+    document.getElementById('modalOverlay').addEventListener('click', function(e) {
+      if (e.target === this) closeModal();
+    });
 
     loadFiles(null);
   </script>
