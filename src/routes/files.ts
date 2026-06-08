@@ -32,7 +32,8 @@ const listRoute = createRoute({
   method: 'get',
   path: '/api/files',
   tags: ['파일'],
-  summary: '파일 목록 조회',
+  summary: '파일 목록 조회 (관리자 전용)',
+  description: '저장된 모든 파일의 목록을 페이지네이션으로 조회합니다. 관리자 토큰이 필요합니다.',
   security: [{ bearerAuth: [] }],
   request: { query: queryParamsSchema },
   responses: {
@@ -48,9 +49,13 @@ const listRoute = createRoute({
       content: { 'application/json': { schema: errorResponseSchema } },
       description: '인증 실패',
     },
+    403: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: '관리자 권한 필요',
+    },
     429: {
       content: { 'application/json': { schema: errorResponseSchema } },
-      description: '요청 초과',
+      description: '요청 초과 (분당 60회 제한)',
     },
   },
 })
@@ -71,7 +76,8 @@ const infoRoute = createRoute({
   method: 'get',
   path: '/api/files/:id/info',
   tags: ['파일'],
-  summary: '파일 메타데이터 조회',
+  summary: '파일 메타데이터 조회 (관리자 전용)',
+  description: '특정 파일의 업로드 시간, 만료 시간, 크기 등 메타데이터를 조회합니다. 관리자 토큰이 필요합니다.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ id: z.string() }),
@@ -85,13 +91,21 @@ const infoRoute = createRoute({
       },
       description: '파일 정보',
     },
+    401: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: '인증 실패',
+    },
+    403: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: '관리자 권한 필요',
+    },
     404: {
       content: { 'application/json': { schema: errorResponseSchema } },
       description: '파일을 찾을 수 없음',
     },
-    401: {
+    429: {
       content: { 'application/json': { schema: errorResponseSchema } },
-      description: '인증 실패',
+      description: '요청 초과 (분당 60회 제한)',
     },
   },
 })
@@ -127,7 +141,8 @@ const deleteRoute = createRoute({
   method: 'delete',
   path: '/api/files/:id',
   tags: ['파일'],
-  summary: '파일 삭제',
+  summary: '파일 삭제 (관리자 전용)',
+  description: '지정한 파일을 R2 버킷에서 영구 삭제합니다. 관리자 토큰이 필요합니다.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ id: z.string() }),
@@ -141,13 +156,21 @@ const deleteRoute = createRoute({
       },
       description: '삭제 성공',
     },
+    401: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: '인증 실패',
+    },
+    403: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: '관리자 권한 필요',
+    },
     404: {
       content: { 'application/json': { schema: errorResponseSchema } },
       description: '파일을 찾을 수 없음',
     },
-    401: {
+    429: {
       content: { 'application/json': { schema: errorResponseSchema } },
-      description: '인증 실패',
+      description: '요청 초과 (분당 60회 제한)',
     },
     500: {
       content: { 'application/json': { schema: errorResponseSchema } },
@@ -186,6 +209,7 @@ const uploadRoute = createRoute({
   path: '/api/files',
   tags: ['파일'],
   summary: '파일 업로드',
+  description: 'multipart/form-data로 파일을 업로드합니다. 최대 250MB까지 허용됩니다. API_KEY 또는 관리자 토큰이 필요합니다.',
   security: [{ bearerAuth: [] }],
   request: {
     body: {
@@ -203,11 +227,11 @@ const uploadRoute = createRoute({
           schema: z.object({ success: z.literal(true), data: fileMetadataSchema }),
         },
       },
-      description: '업로드 성공',
+      description: '업로드 성공 (파일 ID, 만료 시간 등 메타데이터 반환)',
     },
     400: {
       content: { 'application/json': { schema: errorResponseSchema } },
-      description: '유효하지 않은 요청',
+      description: '유효하지 않은 요청 (file 필드 누락 등)',
     },
     401: {
       content: { 'application/json': { schema: errorResponseSchema } },
@@ -215,15 +239,15 @@ const uploadRoute = createRoute({
     },
     413: {
       content: { 'application/json': { schema: errorResponseSchema } },
-      description: '파일 크기 초과',
+      description: '파일 크기 초과 (최대 250MB)',
     },
     415: {
       content: { 'application/json': { schema: errorResponseSchema } },
-      description: '지원하지 않는 파일 형식',
+      description: '지원하지 않는 파일 형식 (text/html 등 차단)',
     },
     429: {
       content: { 'application/json': { schema: errorResponseSchema } },
-      description: '요청 초과',
+      description: '요청 초과 (분당 60회 제한)',
     },
     500: {
       content: { 'application/json': { schema: errorResponseSchema } },
@@ -283,6 +307,7 @@ const downloadRoute = createRoute({
   path: '/api/files/:id',
   tags: ['파일'],
   summary: '파일 다운로드',
+  description: '파일 ID로 바이너리 데이터를 다운로드합니다. Content-Disposition: attachment로 처리되어 파일로 저장됩니다. API_KEY 또는 관리자 토큰이 필요합니다.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ id: z.string() }),
@@ -301,7 +326,7 @@ const downloadRoute = createRoute({
     },
     429: {
       content: { 'application/json': { schema: errorResponseSchema } },
-      description: '요청 초과',
+      description: '요청 초과 (분당 60회 제한)',
     },
   },
 })
