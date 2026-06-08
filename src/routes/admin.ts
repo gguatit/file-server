@@ -222,15 +222,29 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       opts = opts || {};
       opts.headers = opts.headers || {};
       opts.headers['Authorization'] = 'Bearer ' + ADMIN_TOKEN;
+      opts.credentials = 'same-origin';
       return fetch(path, opts);
     }
 
     async function loadFiles(c) {
       var url = '/api/files?limit=20';
       if (c) url += '&cursor=' + encodeURIComponent(c);
-      var res = await api(url);
-      var data = await res.json();
-      if (!data.success) return;
+      var tbody = document.getElementById('fileTableBody');
+      try {
+        var res = await api(url);
+        var data = await res.json();
+        if (!data.success) {
+          tbody.innerHTML = '<tr><td colspan="5" class="empty">API 오류: ' + esc(JSON.stringify(data.error)) + '</td></tr>';
+          return;
+        }
+        if (!data.data) {
+          tbody.innerHTML = '<tr><td colspan="5" class="empty">응답 데이터가 없습니다.</td></tr>';
+          return;
+        }
+      } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="5" class="empty">요청 실패: ' + esc(e.message || '') + '</td></tr>';
+        return;
+      }
 
       var tbody = document.getElementById('fileTableBody');
       if (!data.data.items.length) {
