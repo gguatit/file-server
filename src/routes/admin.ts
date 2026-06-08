@@ -258,16 +258,16 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       var totalSize = 0;
       var rows = data.data.items.map(function(f) {
         totalSize += f.size;
-        var safeName = JSON.stringify(f.originalFilename);
-        var safeId = JSON.stringify(f.id);
+        var safeName = JSON.stringify(f.originalFilename).replace(/'/g, '&#39;');
+        var safeId = JSON.stringify(f.id).replace(/'/g, '&#39;');
         return '<tr>' +
           '<td>' + esc(f.originalFilename) + '</td>' +
           '<td>' + formatSize(f.size) + '</td>' +
           '<td>' + formatTime(f.uploadedAt) + '</td>' +
           '<td>' + formatTime(f.expireAt) + '</td>' +
           '<td>' +
-            '<button class="btn-copy" onclick="copyUrl(' + safeId + ', ' + safeName + ')">복사</button>' +
-            '<button class="btn-delete" onclick="deleteFile(' + safeId + ')">삭제</button>' +
+            '<button class="btn-copy" onclick=\\'copyUrl(' + safeId + ', ' + safeName + ')\\'">복사</button>' +
+            '<button class="btn-delete" onclick=\\'deleteFile(' + safeId + ')\\'">삭제</button>' +
           '</td>' +
         '</tr>';
       }).join('');
