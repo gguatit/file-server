@@ -26,6 +26,8 @@ const app = new OpenAPIHono<{ Bindings: Env }>()
 app.use('*', cors())
 app.use('*', rateLimit())
 
+app.get('/', (c) => c.redirect('/api/docs'))
+
 configureOpenApi(app)
 
 const listRoute = createRoute({
