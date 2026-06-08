@@ -1,5 +1,5 @@
 import type { R2Bucket, R2Object } from '@cloudflare/workers-types'
-import { FILE_RETENTION_HOURS } from '../schemas/files'
+import { FILE_RETENTION_HOURS, MAX_FILENAME_LENGTH } from '../schemas/files'
 import type { FileMetadata, PaginatedList } from '../lib/types'
 
 export function generateFileId(): string {
@@ -17,7 +17,7 @@ export function r2ObjectToMetadata(obj: R2Object): FileMetadata {
     originalFilename: (custom.originalFilename as string) || obj.key,
     size: obj.size,
     uploadedAt: (custom.uploadedAt as string) || obj.uploaded.toISOString(),
-    expireAt: (custom.expireAt as string) || '',
+    expireAt: (custom.expireAt as string) || obj.uploaded.toISOString(),
     contentType: obj.httpMetadata?.contentType ?? undefined,
   }
 }
@@ -34,12 +34,13 @@ export async function uploadFile(
   const now = new Date()
   const expireAt = computeExpireAt()
 
+  const safeName = metadata.originalFilename.slice(0, MAX_FILENAME_LENGTH)
   const obj = await bucket.put(key, body, {
     httpMetadata: {
       contentType: metadata.contentType ?? 'application/octet-stream',
     },
     customMetadata: {
-      originalFilename: metadata.originalFilename,
+      originalFilename: safeName,
       uploadedAt: now.toISOString(),
       expireAt: expireAt.toISOString(),
     },
@@ -53,7 +54,7 @@ export async function uploadFile(
     size: obj.size,
     uploadedAt: now.toISOString(),
     expireAt: expireAt.toISOString(),
-    contentType: metadata.contentType,
+    contentType: obj.httpMetadata?.contentType ?? metadata.contentType,
   }
 }
 
@@ -70,7 +71,7 @@ export async function getFileBody(
   key: string,
 ): Promise<{ body: ReadableStream; obj: R2Object } | null> {
   const result = await bucket.get(key)
-  if (!result) return null
+  if (!result || !result.body) return null
   return { body: result.body, obj: result }
 }
 

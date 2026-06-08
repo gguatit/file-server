@@ -23,7 +23,7 @@ export async function checkAuth(c: Context<{ Bindings: Env }>, requireAdmin = fa
     return null
   }
 
-  const adminPayload = await verifyAdminToken(token, c.env.ADMIN_PW_HASH)
+  const adminPayload = await verifyAdminToken(token, c.env.ADMIN_TOKEN_SECRET)
   if (adminPayload) {
     return null
   }

@@ -2,6 +2,7 @@ import { z } from 'zod'
 
 export const FILE_RETENTION_HOURS = 24
 export const MAX_UPLOAD_SIZE = 262144000
+export const MAX_FILENAME_LENGTH = 512
 
 export const BLOCKED_MIME_TYPES = [
   'text/html',
@@ -13,11 +14,11 @@ export const BLOCKED_MIME_TYPES = [
 ]
 
 export const fileMetadataSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string(),
   originalFilename: z.string(),
   size: z.number().int().positive(),
   uploadedAt: z.string().datetime(),
-  expireAt: z.string().datetime(),
+  expireAt: z.string().optional(),
   contentType: z.string().optional(),
 })
 
@@ -28,7 +29,7 @@ export const fileListDataSchema = z.object({
 })
 
 export const deleteDataSchema = z.object({
-  id: z.string().uuid(),
+  id: z.string(),
   deleted: z.boolean(),
 })
 

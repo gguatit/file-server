@@ -1,6 +1,6 @@
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi'
 import type { Env, ApiResponse, FileMetadata, PaginatedList } from '../lib/types'
-import { MAX_UPLOAD_SIZE, BLOCKED_MIME_TYPES } from '../schemas/files'
+import { BLOCKED_MIME_TYPES, MAX_FILENAME_LENGTH } from '../schemas/files'
 import {
   fileMetadataSchema,
   fileListDataSchema,
@@ -270,10 +270,19 @@ app.openapi(uploadRoute, async (c) => {
     )
   }
 
-  if (file.size > MAX_UPLOAD_SIZE) {
+  const maxUploadSize = parseInt(c.env.MAX_UPLOAD_SIZE || '262144000', 10)
+
+  if (file.size > maxUploadSize) {
     return c.json(
-      { success: false, error: { code: 'FILE_TOO_LARGE', message: `파일 크기는 최대 250MB까지 허용됩니다. 현재 크기: ${(file.size / 1024 / 1024).toFixed(2)}MB` } },
+      { success: false, error: { code: 'FILE_TOO_LARGE', message: `파일 크기는 최대 ${Math.round(maxUploadSize / 1024 / 1024)}MB까지 허용됩니다. 현재 크기: ${(file.size / 1024 / 1024).toFixed(2)}MB` } },
       413,
+    )
+  }
+
+  if (file.name.length > MAX_FILENAME_LENGTH) {
+    return c.json(
+      { success: false, error: { code: 'VALIDATION_ERROR', message: `파일명은 최대 ${MAX_FILENAME_LENGTH}자까지 허용됩니다.` } },
+      400,
     )
   }
 
@@ -349,14 +358,18 @@ app.openapi(downloadRoute, async (c) => {
   const contentType = obj.httpMetadata?.contentType ?? 'application/octet-stream'
   const custom = obj.customMetadata ?? {}
   const originalFilename = (custom.originalFilename as string) || id
+  const asciiFilename = originalFilename.replace(/[^\x20-\x7E]/g, '_')
 
   c.res.headers.set('Content-Type', contentType)
+  c.res.headers.set('Content-Length', String(obj.size))
   c.res.headers.set(
     'Content-Disposition',
-    `attachment; filename*=UTF-8''${encodeURIComponent(originalFilename)}`,
+    `attachment; filename="${asciiFilename}"; filename*=UTF-8''${encodeURIComponent(originalFilename)}`,
   )
   c.res.headers.set('Cache-Control', 'no-store')
   c.res.headers.set('X-Content-Type-Options', 'nosniff')
+  c.res.headers.set('X-Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'")
+  c.res.headers.set('Referrer-Policy', 'no-referrer')
 
   return c.newResponse(body, 200)
 })

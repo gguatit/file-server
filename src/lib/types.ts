@@ -27,6 +27,7 @@ export interface Env {
   API_KEY: string
   ADMIN_ID: string
   ADMIN_PW_HASH: string
+  ADMIN_TOKEN_SECRET: string
   MAX_UPLOAD_SIZE: string
   RATE_LIMIT_PER_MINUTE: string
   ALLOWED_ORIGIN: string

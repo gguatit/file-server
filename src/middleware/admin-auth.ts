@@ -19,7 +19,7 @@ export const adminPageAuth = (): MiddlewareHandler<{ Bindings: Env }> => {
     const token = extractToken(c)
     if (!token) return c.redirect('/admin/login')
 
-    const payload = await verifyAdminToken(token, c.env.ADMIN_PW_HASH)
+    const payload = await verifyAdminToken(token, c.env.ADMIN_TOKEN_SECRET)
     if (!payload) return c.redirect('/admin/login')
 
     await next()
@@ -36,7 +36,7 @@ export const adminApiAuth = (): MiddlewareHandler<{ Bindings: Env }> => {
       )
     }
 
-    const payload = await verifyAdminToken(token, c.env.ADMIN_PW_HASH)
+    const payload = await verifyAdminToken(token, c.env.ADMIN_TOKEN_SECRET)
     if (!payload) {
       return c.json(
         { success: false, error: { code: 'UNAUTHORIZED', message: '유효하지 않은 관리자 인증입니다.' } },

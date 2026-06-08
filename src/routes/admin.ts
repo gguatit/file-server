@@ -5,6 +5,8 @@ import { adminPageAuth } from '../middleware/admin-auth'
 
 const app = new Hono<{ Bindings: Env }>()
 
+const loginAttempts = new Map<string, { count: number; resetAt: number }>()
+
 const loginHTML = `<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -66,21 +68,43 @@ app.get('/admin/login', (c) => {
 })
 
 app.post('/admin/login', async (c) => {
-  const body = await c.req.json<{ id: string; password: string }>()
-  if (!body.id || !body.password) {
+  let body: { id?: string; password?: string } = {}
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: '요청 형식이 올바르지 않습니다.' } }, 400)
+  }
+
+  if (!body || typeof body !== 'object' || !body.id || !body.password) {
     return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: '아이디와 비밀번호를 입력하세요.' } }, 400)
   }
 
   if (body.id !== c.env.ADMIN_ID) {
+    await new Promise((r) => setTimeout(r, 500))
     return c.json({ success: false, error: { code: 'UNAUTHORIZED', message: '아이디 또는 비밀번호가 올바르지 않습니다.' } }, 401)
+  }
+
+  const ip = c.req.header('CF-Connecting-IP') || 'unknown'
+  const now = Date.now()
+  const attempt = loginAttempts.get(ip)
+  if (attempt && now < attempt.resetAt && attempt.count >= 5) {
+    return c.json({ success: false, error: { code: 'RATE_LIMITED', message: '로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요.' } }, 429)
   }
 
   const valid = await verifyAdminPassword(body.password, c.env.ADMIN_PW_HASH)
   if (!valid) {
+    if (!attempt || now > attempt.resetAt) {
+      loginAttempts.set(ip, { count: 1, resetAt: now + 300000 })
+    } else {
+      attempt.count++
+    }
+    await new Promise((r) => setTimeout(r, 500))
     return c.json({ success: false, error: { code: 'UNAUTHORIZED', message: '아이디 또는 비밀번호가 올바르지 않습니다.' } }, 401)
   }
 
-  const token = await createAdminToken(body.id, c.env.ADMIN_PW_HASH)
+  loginAttempts.delete(ip)
+
+  const token = await createAdminToken(body.id, c.env.ADMIN_TOKEN_SECRET)
 
   c.header(
     'Set-Cookie',
@@ -217,16 +241,18 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       }
 
       var totalSize = 0;
-      tbody.innerHTML = data.data.items.map(function(f) {
+      var rows = data.data.items.map(function(f) {
         totalSize += f.size;
+        var safeName = JSON.stringify(f.originalFilename);
+        var safeId = JSON.stringify(f.id);
         return '<tr>' +
           '<td>' + esc(f.originalFilename) + '</td>' +
           '<td>' + formatSize(f.size) + '</td>' +
           '<td>' + formatTime(f.uploadedAt) + '</td>' +
           '<td>' + formatTime(f.expireAt) + '</td>' +
           '<td>' +
-            '<button class="btn-copy" onclick="copyUrl(\\'' + f.id + '\\', \\'' + esc(f.originalFilename) + '\\')">복사</button>' +
-            '<button class="btn-delete" onclick="deleteFile(\\'' + f.id + '\\')">삭제</button>' +
+            '<button class="btn-copy" onclick="copyUrl(' + safeId + ', ' + safeName + ')">복사</button>' +
+            '<button class="btn-delete" onclick="deleteFile(' + safeId + ')">삭제</button>' +
           '</td>' +
         '</tr>';
       }).join('');
