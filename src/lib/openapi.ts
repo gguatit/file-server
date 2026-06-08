@@ -1,7 +1,7 @@
 import { apiReference } from '@scalar/hono-api-reference'
 import type { OpenAPIHono } from '@hono/zod-openapi'
 import type { Env } from './types'
-import { adminApiAuth } from '../middleware/admin-auth'
+import { adminApiAuth, adminPageAuth } from '../middleware/admin-auth'
 
 export function configureOpenApi(app: OpenAPIHono<{ Bindings: Env }>) {
   app.use('/api/openapi', adminApiAuth())
@@ -32,7 +32,7 @@ export function configureOpenApi(app: OpenAPIHono<{ Bindings: Env }>) {
     },
   } as any)
 
-  app.use('/api/docs', adminApiAuth())
+  app.use('/api/docs', adminPageAuth())
 
   app.get(
     '/api/docs',
