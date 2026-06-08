@@ -272,6 +272,8 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
         '</tr>';
       }).join('');
 
+      tbody.innerHTML = rows;
+
       document.getElementById('fileCount').textContent = data.data.items.length;
       document.getElementById('totalSize').textContent = formatSize(totalSize);
 
