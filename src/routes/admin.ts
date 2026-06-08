@@ -64,6 +64,7 @@ const loginHTML = `<!DOCTYPE html>
 </html>`
 
 app.get('/admin/login', (c) => {
+  c.header('Cache-Control', 'no-store, no-cache, must-revalidate')
   return c.html(loginHTML)
 })
 
@@ -330,6 +331,7 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
 
 app.get('/admin', adminPageAuth(), (c) => {
   const token = c.get('adminToken')
+  c.header('Cache-Control', 'no-store, no-cache, must-revalidate')
   return c.html(dashboardHTML(token))
 })
 
