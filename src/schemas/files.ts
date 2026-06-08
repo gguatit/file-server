@@ -4,14 +4,7 @@ export const FILE_RETENTION_HOURS = 24
 export const MAX_UPLOAD_SIZE = 262144000
 export const MAX_FILENAME_LENGTH = 512
 
-export const BLOCKED_MIME_TYPES = [
-  'text/html',
-  'application/x-httpd-php',
-  'application/x-msdownload',
-  'application/x-sh',
-  'application/x-bat',
-  'application/x-msi',
-]
+export const BLOCKED_MIME_TYPES: string[] = []
 
 export const fileMetadataSchema = z.object({
   id: z.string(),

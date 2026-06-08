@@ -243,7 +243,7 @@ const uploadRoute = createRoute({
     },
     415: {
       content: { 'application/json': { schema: errorResponseSchema } },
-      description: '지원하지 않는 파일 형식 (text/html 등 차단)',
+      description: '지원하지 않는 파일 형식',
     },
     429: {
       content: { 'application/json': { schema: errorResponseSchema } },
