@@ -8,7 +8,10 @@ export const cors = (): MiddlewareHandler<{ Bindings: Env }> => {
     const origin = c.req.header('Origin')
 
     if (origin) {
-      if (origin !== allowedOrigin) {
+      const requestUrl = new URL(c.req.url)
+      const isSameOrigin = origin === `${requestUrl.protocol}//${requestUrl.host}`
+
+      if (origin !== allowedOrigin && !isSameOrigin) {
         return c.json(
           {
             success: false,
@@ -21,7 +24,7 @@ export const cors = (): MiddlewareHandler<{ Bindings: Env }> => {
         )
       }
 
-      c.res.headers.set('Access-Control-Allow-Origin', allowedOrigin)
+      c.res.headers.set('Access-Control-Allow-Origin', isSameOrigin ? origin : allowedOrigin)
       c.res.headers.set(
         'Access-Control-Allow-Methods',
         'GET, POST, DELETE, OPTIONS',
