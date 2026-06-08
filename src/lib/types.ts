@@ -25,6 +25,8 @@ export interface PaginatedList<T> {
 export interface Env {
   FILE_BUCKET: R2Bucket
   API_KEY: string
+  ADMIN_ID: string
+  ADMIN_PW_HASH: string
   MAX_UPLOAD_SIZE: string
   RATE_LIMIT_PER_MINUTE: string
   ALLOWED_ORIGIN: string

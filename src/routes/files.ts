@@ -16,7 +16,7 @@ import {
   listFiles,
   generateFileId,
 } from '../services/r2'
-import { auth } from '../middleware/auth'
+import { checkAuth } from '../middleware/auth'
 import { cors } from '../middleware/cors'
 import { rateLimit } from '../middleware/rate-limit'
 import { configureOpenApi } from '../lib/openapi'
@@ -28,13 +28,12 @@ app.use('*', rateLimit())
 
 app.get('/', (c) => c.redirect('/api/docs'))
 
-configureOpenApi(app)
-
 const listRoute = createRoute({
   method: 'get',
   path: '/api/files',
   tags: ['파일'],
   summary: '파일 목록 조회',
+  security: [{ bearerAuth: [] }],
   request: { query: queryParamsSchema },
   responses: {
     200: {
@@ -57,6 +56,9 @@ const listRoute = createRoute({
 })
 
 app.openapi(listRoute, async (c) => {
+  const authErr = await checkAuth(c, true)
+  if (authErr) return authErr as any
+
   const { cursor, limit } = c.req.valid('query')
   const result = await listFiles(c.env.FILE_BUCKET, { cursor, limit })
   return c.json(
@@ -70,6 +72,7 @@ const infoRoute = createRoute({
   path: '/api/files/:id/info',
   tags: ['파일'],
   summary: '파일 메타데이터 조회',
+  security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ id: z.string() }),
   },
@@ -94,6 +97,9 @@ const infoRoute = createRoute({
 })
 
 app.openapi(infoRoute, async (c) => {
+  const authErr = await checkAuth(c, true)
+  if (authErr) return authErr as any
+
   const { id } = c.req.valid('param')
   const obj = await getFile(c.env.FILE_BUCKET, id)
 
@@ -122,6 +128,7 @@ const deleteRoute = createRoute({
   path: '/api/files/:id',
   tags: ['파일'],
   summary: '파일 삭제',
+  security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ id: z.string() }),
   },
@@ -150,6 +157,9 @@ const deleteRoute = createRoute({
 })
 
 app.openapi(deleteRoute, async (c) => {
+  const authErr = await checkAuth(c, true)
+  if (authErr) return authErr as any
+
   const { id } = c.req.valid('param')
 
   const obj = await getFile(c.env.FILE_BUCKET, id)
@@ -171,7 +181,61 @@ app.openapi(deleteRoute, async (c) => {
   return c.json({ success: true as const, data: { id, deleted: true } }, 200)
 })
 
-app.on(['POST'], '/api/files', auth(), async (c) => {
+const uploadRoute = createRoute({
+  method: 'post' as const,
+  path: '/api/files',
+  tags: ['파일'],
+  summary: '파일 업로드',
+  security: [{ bearerAuth: [] }],
+  request: {
+    body: {
+      content: {
+        'multipart/form-data': {
+          schema: z.object({ file: z.any() }),
+        },
+      },
+    },
+  },
+  responses: {
+    201: {
+      content: {
+        'application/json': {
+          schema: z.object({ success: z.literal(true), data: fileMetadataSchema }),
+        },
+      },
+      description: '업로드 성공',
+    },
+    400: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: '유효하지 않은 요청',
+    },
+    401: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: '인증 실패',
+    },
+    413: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: '파일 크기 초과',
+    },
+    415: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: '지원하지 않는 파일 형식',
+    },
+    429: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: '요청 초과',
+    },
+    500: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: '서버 오류',
+    },
+  },
+})
+
+app.openapi(uploadRoute, async (c) => {
+  const authErr = await checkAuth(c, false)
+  if (authErr) return authErr as any
+
   const formData = await c.req.formData()
   const file = formData.get('file') as File | null
 
@@ -214,8 +278,39 @@ app.on(['POST'], '/api/files', auth(), async (c) => {
   return c.json({ success: true, data: metadata } satisfies ApiResponse<FileMetadata>, 201)
 })
 
-app.on(['GET'], '/api/files/:id', auth(), async (c) => {
-  const id = c.req.param('id')
+const downloadRoute = createRoute({
+  method: 'get' as const,
+  path: '/api/files/:id',
+  tags: ['파일'],
+  summary: '파일 다운로드',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ id: z.string() }),
+  },
+  responses: {
+    200: {
+      description: '파일 바이너리 데이터',
+    },
+    401: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: '인증 실패',
+    },
+    404: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: '파일을 찾을 수 없음',
+    },
+    429: {
+      content: { 'application/json': { schema: errorResponseSchema } },
+      description: '요청 초과',
+    },
+  },
+})
+
+app.openapi(downloadRoute, async (c) => {
+  const authErr = await checkAuth(c, false)
+  if (authErr) return authErr as any
+
+  const { id } = c.req.valid('param')
 
   const result = await getFileBody(c.env.FILE_BUCKET, id)
   if (!result) {
@@ -240,6 +335,8 @@ app.on(['GET'], '/api/files/:id', auth(), async (c) => {
 
   return c.newResponse(body, 200)
 })
+
+configureOpenApi(app)
 
 app.onError((err, c) => {
   console.error('Unhandled error:', err)
