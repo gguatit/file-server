@@ -3,7 +3,7 @@ import type { Env } from '../lib/types'
 import { verifyAdminPassword, createAdminToken } from '../services/admin'
 import { adminPageAuth } from '../middleware/admin-auth'
 
-const app = new Hono<{ Bindings: Env }>()
+const app = new Hono<{ Bindings: Env; Variables: { adminToken: string } }>()
 
 const loginAttempts = new Map<string, { count: number; resetAt: number }>()
 
@@ -329,9 +329,7 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
 </html>`
 
 app.get('/admin', adminPageAuth(), (c) => {
-  const cookie = c.req.raw.headers.get('cookie') || ''
-  const match = cookie.split(';').map((s) => s.trim()).find((s) => s.startsWith('admin_token='))
-  const token = match ? match.slice(12) : ''
+  const token = c.get('adminToken')
   return c.html(dashboardHTML(token))
 })
 

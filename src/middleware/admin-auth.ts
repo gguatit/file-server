@@ -14,7 +14,7 @@ function extractToken(c: { req: { header: (name: string) => string | undefined; 
   return match ? match.slice(12) : null
 }
 
-export const adminPageAuth = (): MiddlewareHandler<{ Bindings: Env }> => {
+export const adminPageAuth = (): MiddlewareHandler<{ Bindings: Env; Variables: { adminToken: string } }> => {
   return async (c, next) => {
     const token = extractToken(c)
     if (!token) return c.redirect('/admin/login')
@@ -22,6 +22,7 @@ export const adminPageAuth = (): MiddlewareHandler<{ Bindings: Env }> => {
     const payload = await verifyAdminToken(token, c.env.ADMIN_TOKEN_SECRET)
     if (!payload) return c.redirect('/admin/login')
 
+    c.set('adminToken', token)
     await next()
   }
 }
