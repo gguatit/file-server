@@ -493,52 +493,82 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
 
     var CHUNK_SIZE = 50 * 1024 * 1024;
 
+    function formatUploadProgress(uploaded, total) {
+      if (total < 1048576) return formatSize(uploaded) + ' / ' + formatSize(total);
+      return (uploaded / 1048576).toFixed(1) + 'MB / ' + (total / 1048576).toFixed(1) + 'MB';
+    }
+
     async function uploadChunked(file) {
+      console.log('[upload] 청크 업로드 시작:', file.name, formatSize(file.size));
       var initRes = await api('/api/files/chunked/init', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filename: file.name, totalSize: file.size, contentType: file.type }),
       });
+      console.log('[upload] init 응답:', initRes.status, initRes.statusText);
       var initData = await initRes.json();
+      console.log('[upload] init 데이터:', JSON.stringify(initData));
       if (!initData.success) throw new Error(initData.error && initData.error.message || '초기화 실패');
       var uploadId = initData.data.uploadId;
       var fileId = initData.data.fileId;
+      console.log('[upload] uploadId:', uploadId, 'fileId:', fileId);
       var totalParts = Math.ceil(file.size / CHUNK_SIZE);
+      console.log('[upload] 총 청크 수:', totalParts);
+      var uploadedBytes = 0;
       for (var p = 0; p < totalParts; p++) {
         var start = p * CHUNK_SIZE;
         var end = Math.min(start + CHUNK_SIZE, file.size);
         var chunk = file.slice(start, end);
-        var partRes = await api('/api/files/chunked/' + uploadId + '/part?partNumber=' + (p + 1) + '&fileId=' + fileId, {
+        var chunkSize = end - start;
+        var partUrl = '/api/files/chunked/' + uploadId + '/part?partNumber=' + (p + 1) + '&fileId=' + fileId;
+        console.log('[upload] 청크 ' + (p + 1) + '/' + totalParts, '크기:', formatSize(chunkSize));
+        var partRes = await api(partUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/octet-stream' },
           body: chunk,
         });
+        console.log('[upload] 청크 ' + (p + 1) + ' 응답:', partRes.status, partRes.statusText);
         var partData = await partRes.json();
-        if (!partData.success) throw new Error('청크 업로드 실패');
+        console.log('[upload] 청크 ' + (p + 1) + ' 데이터:', JSON.stringify(partData));
+        if (!partData.success) throw new Error('청크 업로드 실패 (part ' + (p + 1) + '): ' + (partData.error && partData.error.message || ''));
+        uploadedBytes += chunkSize;
+        var progEl = document.getElementById('uploadProgress');
+        progEl.innerHTML = '<span class="spinner"></span>' + formatUploadProgress(uploadedBytes, file.size);
       }
+      console.log('[upload] complete 요청...');
       var compRes = await api('/api/files/chunked/' + uploadId + '/complete?fileId=' + fileId, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: '{}',
       });
+      console.log('[upload] complete 응답:', compRes.status, compRes.statusText);
       var compData = await compRes.json();
-      if (!compData.success) throw new Error('완료 실패');
+      console.log('[upload] complete 데이터:', JSON.stringify(compData));
+      if (!compData.success) throw new Error('완료 실패: ' + (compData.error && compData.error.message || ''));
+      console.log('[upload] 청크 업로드 완료:', file.name);
     }
 
     async function uploadOneFile(file, idx, total) {
+      console.log('[upload] 파일 ' + idx + '/' + total + ':', file.name, formatSize(file.size), 'type:', file.type);
       if (file.size > CHUNK_SIZE) {
+        console.log('[upload] ' + formatSize(file.size) + ' > ' + formatSize(CHUNK_SIZE) + ' → 청크 업로드 사용');
         return uploadChunked(file);
       }
+      console.log('[upload] 일반 업로드 사용');
       var form = new FormData();
       form.append('file', file);
       var res = await api('/api/files', { method: 'POST', body: form });
+      console.log('[upload] 응답:', res.status, res.statusText);
       var data = await res.json();
+      console.log('[upload] 데이터:', JSON.stringify(data));
       if (!data.success) throw new Error(data.error && data.error.message || '업로드 실패');
+      console.log('[upload] 완료:', data.data && data.data.id);
     }
 
     async function uploadFiles() {
       var input = document.getElementById('uploadFileInput');
       var files = input.files;
+      console.log('[upload] 시작: 파일 ' + files.length + '개');
       if (!files.length) { showToast('파일을 선택하세요.', 'error'); return; }
       var btn = document.getElementById('uploadBtn');
       var progress = document.getElementById('uploadProgress');
@@ -552,12 +582,15 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
           await uploadOneFile(files[i], i + 1, total);
           successCount++;
         } catch (e) {
+          console.error('[upload] 실패:', e.message || e);
+          showToast((i + 1) + '번 파일 실패: ' + (e.message || '오류'), 'error');
           failCount++;
         }
       }
       btn.disabled = false;
       progress.textContent = '';
       input.value = '';
+      console.log('[upload] 완료: ' + successCount + ' 성공, ' + failCount + ' 실패');
       if (failCount === 0) showToast(successCount + '개 파일 업로드 완료', 'success');
       else showToast(successCount + '개 성공, ' + failCount + '개 실패', failCount === total ? 'error' : 'info');
       refresh();

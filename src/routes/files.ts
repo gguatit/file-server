@@ -611,6 +611,7 @@ app.on(['POST'], '/api/files/chunked/init', cors(), rateLimit(), async (c) => {
   }
 
   const fileId = generateFileId()
+  console.log('[chunked-init] fileId:', fileId, 'filename:', body.filename, 'totalSize:', body.totalSize)
   const result = await initMultipartUpload(c.env.FILE_BUCKET, fileId, {
     originalFilename: body.filename,
     contentType: body.contentType,
@@ -649,8 +650,10 @@ app.on(['POST'], '/api/files/chunked/:uploadId/part', cors(), rateLimit(), async
     return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'fileId 쿼리 파라미터가 필요합니다.' } }, 400)
   }
 
+  console.log('[chunked-part] uploadId:', uploadId, 'fileId:', fileId, 'partNumber:', partNumber, 'size:', arrayBuffer.byteLength)
   const ok = await uploadMultipartPart(c.env.FILE_BUCKET, fileId, uploadId, partNumber, arrayBuffer)
   if (!ok) {
+    console.error('[chunked-part] uploadMultipartPart failed')
     return c.json({ success: false, error: { code: 'INTERNAL_ERROR', message: '청크 업로드 실패' } }, 500)
   }
 
@@ -667,8 +670,10 @@ app.on(['POST'], '/api/files/chunked/:uploadId/complete', cors(), rateLimit(), a
     return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'uploadId와 fileId가 필요합니다.' } }, 400)
   }
 
+  console.log('[chunked-complete] uploadId:', uploadId, 'fileId:', fileId)
   const obj = await completeMultipartUpload(c.env.FILE_BUCKET, fileId, uploadId)
   if (!obj) {
+    console.error('[chunked-complete] completeMultipartUpload failed')
     return c.json({ success: false, error: { code: 'INTERNAL_ERROR', message: '업로드 완료 처리 실패' } }, 500)
   }
 
