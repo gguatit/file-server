@@ -7,6 +7,9 @@ import {
   deleteDataSchema,
   errorResponseSchema,
   queryParamsSchema,
+  extendDataSchema,
+  shareDataSchema,
+  statsDataSchema,
 } from '../schemas/files'
 import {
   uploadFile,
@@ -20,6 +23,9 @@ import { checkAuth } from '../middleware/auth'
 import { cors } from '../middleware/cors'
 import { rateLimit } from '../middleware/rate-limit'
 import { configureOpenApi } from '../lib/openapi'
+import { createShareToken, verifyShareToken } from '../services/admin'
+import { logEvent } from '../services/logger'
+import { getBucketStats } from '../services/stats'
 
 const app = new OpenAPIHono<{ Bindings: Env }>()
 
@@ -63,6 +69,9 @@ const listRoute = createRoute({
 app.openapi(listRoute, async (c) => {
   const authErr = await checkAuth(c, true)
   if (authErr) return authErr as any
+
+  const ip = c.req.header('CF-Connecting-IP') || 'unknown'
+  logEvent('list', ip)
 
   const { cursor, limit } = c.req.valid('query')
   const result = await listFiles(c.env.FILE_BUCKET, { cursor, limit })
@@ -115,6 +124,10 @@ app.openapi(infoRoute, async (c) => {
   if (authErr) return authErr as any
 
   const { id } = c.req.valid('param')
+
+  const ip = c.req.header('CF-Connecting-IP') || 'unknown'
+  logEvent('info', ip, { fileId: id })
+
   const obj = await getFile(c.env.FILE_BUCKET, id)
 
   if (!obj) {
@@ -200,6 +213,9 @@ app.openapi(deleteRoute, async (c) => {
       500,
     )
   }
+
+  const ip = c.req.header('CF-Connecting-IP') || 'unknown'
+  logEvent('delete', ip, { fileId: id })
 
   return c.json({ success: true as const, data: { id, deleted: true } }, 200)
 })
@@ -308,6 +324,9 @@ app.openapi(uploadRoute, async (c) => {
     )
   }
 
+  const uploadIp = c.req.header('CF-Connecting-IP') || 'unknown'
+  logEvent('upload', uploadIp, { fileId, fileName: file.name, fileSize: file.size })
+
   return c.json({ success: true, data: metadata } satisfies ApiResponse<FileMetadata>, 201)
 })
 
@@ -371,7 +390,197 @@ app.openapi(downloadRoute, async (c) => {
   c.res.headers.set('X-Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'")
   c.res.headers.set('Referrer-Policy', 'no-referrer')
 
+  const ip = c.req.header('CF-Connecting-IP') || 'unknown'
+  logEvent('download', ip, { fileId: id, fileName: originalFilename, fileSize: obj.size })
+
   return c.newResponse(body, 200)
+})
+
+const extendRoute = createRoute({
+  method: 'put',
+  path: '/api/files/:id/extend',
+  tags: ['파일'],
+  summary: '파일 만료 시간 연장 (관리자 전용)',
+  description: '파일의 만료 시간을 지정한 시간만큼 연장합니다. 관리자 토큰이 필요합니다.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ id: z.string() }),
+    body: { content: { 'application/json': { schema: z.object({ hours: z.number().int().min(1).max(168) }) } } },
+  },
+  responses: {
+    200: { content: { 'application/json': { schema: z.object({ success: z.literal(true), data: extendDataSchema }) } }, description: '연장 성공' },
+    401: { content: { 'application/json': { schema: errorResponseSchema } }, description: '인증 실패' },
+    403: { content: { 'application/json': { schema: errorResponseSchema } }, description: '관리자 권한 필요' },
+    404: { content: { 'application/json': { schema: errorResponseSchema } }, description: '파일을 찾을 수 없음' },
+  },
+})
+
+app.openapi(extendRoute, async (c) => {
+  const authErr = await checkAuth(c, true)
+  if (authErr) return authErr as any
+
+  const { id } = c.req.valid('param')
+  const { hours } = await c.req.json<{ hours: number }>()
+
+  const obj = await getFile(c.env.FILE_BUCKET, id)
+  if (!obj) {
+    return c.json({ success: false as const, error: { code: 'FILE_NOT_FOUND', message: '파일을 찾을 수 없습니다.' } }, 404)
+  }
+
+  const custom = obj.customMetadata ?? {}
+  const currentExpireAt = (custom.expireAt as string) || obj.uploaded.toISOString()
+  const newExpire = new Date(new Date(currentExpireAt).getTime() + hours * 60 * 60 * 1000)
+  const newExpireAt = newExpire.toISOString()
+
+  const r2Body = await getFileBody(c.env.FILE_BUCKET, id)
+  if (!r2Body) {
+    return c.json({ success: false as const, error: { code: 'INTERNAL_ERROR', message: '파일 데이터를 읽을 수 없습니다.' } }, 500)
+  }
+
+  await c.env.FILE_BUCKET.put(id, r2Body.body, {
+    httpMetadata: obj.httpMetadata,
+    customMetadata: { ...custom, expireAt: newExpireAt },
+  })
+
+  const ip = c.req.header('CF-Connecting-IP') || 'unknown'
+  logEvent('extend', ip, { fileId: id, details: `${hours}h` })
+
+  return c.json({ success: true as const, data: { id, newExpireAt, extended: true } }, 200)
+})
+
+const shareRoute = createRoute({
+  method: 'post',
+  path: '/api/files/:id/share',
+  tags: ['파일'],
+  summary: '공유 링크 생성 (관리자 전용)',
+  description: '파일 다운로드 공유 링크를 생성합니다. 생성된 링크로는 인증 없이 다운로드 가능합니다.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ id: z.string() }),
+    body: { content: { 'application/json': { schema: z.object({ expiryHours: z.number().int().min(1).max(72).optional().default(1) }) } } },
+  },
+  responses: {
+    200: { content: { 'application/json': { schema: z.object({ success: z.literal(true), data: shareDataSchema }) } }, description: '공유 링크 생성 성공' },
+    401: { content: { 'application/json': { schema: errorResponseSchema } }, description: '인증 실패' },
+    403: { content: { 'application/json': { schema: errorResponseSchema } }, description: '관리자 권한 필요' },
+    404: { content: { 'application/json': { schema: errorResponseSchema } }, description: '파일을 찾을 수 없음' },
+  },
+})
+
+app.openapi(shareRoute, async (c) => {
+  const authErr = await checkAuth(c, true)
+  if (authErr) return authErr as any
+
+  const { id } = c.req.valid('param')
+  const body = await c.req.json<{ expiryHours?: number }>()
+  const expiryHours = body.expiryHours ?? 1
+
+  const obj = await getFile(c.env.FILE_BUCKET, id)
+  if (!obj) {
+    return c.json({ success: false as const, error: { code: 'FILE_NOT_FOUND', message: '파일을 찾을 수 없습니다.' } }, 404)
+  }
+
+  const token = await createShareToken(id, c.env.ADMIN_TOKEN_SECRET, expiryHours * 3600)
+  const base = (c.env.SHARE_BASE_URL || 'https://file.kalpha.kr').replace(/\/$/, '')
+  const url = `${base}/api/dl/${token}`
+  const expiresAt = new Date(Date.now() + expiryHours * 3600000).toISOString()
+
+  const ip = c.req.header('CF-Connecting-IP') || 'unknown'
+  logEvent('share', ip, { fileId: id, fileSize: obj.size })
+
+  return c.json({ success: true as const, data: { token, url, expiresAt } }, 200)
+})
+
+const shareDownloadRoute = createRoute({
+  method: 'get',
+  path: '/api/dl/{token}',
+  tags: ['파일'],
+  summary: '공유 링크 다운로드 (인증 불필요)',
+  description: '공유 링크를 통해 인증 없이 파일을 다운로드합니다.',
+  request: { params: z.object({ token: z.string() }) },
+  responses: {
+    200: { description: '파일 바이너리 데이터' },
+    404: { content: { 'application/json': { schema: errorResponseSchema } }, description: '유효하지 않거나 만료된 공유 링크' },
+  },
+})
+
+app.openapi(shareDownloadRoute, async (c) => {
+  const { token } = c.req.valid('param')
+
+  const payload = await verifyShareToken(token, c.env.ADMIN_TOKEN_SECRET)
+  if (!payload) {
+    return c.json({ success: false as const, error: { code: 'INVALID_SHARE', message: '유효하지 않거나 만료된 공유 링크입니다.' } }, 404)
+  }
+
+  const result = await getFileBody(c.env.FILE_BUCKET, payload.fileId)
+  if (!result) {
+    return c.json({ success: false as const, error: { code: 'FILE_NOT_FOUND', message: '파일을 찾을 수 없습니다.' } }, 404)
+  }
+
+  const { body, obj } = result
+  const contentType = obj.httpMetadata?.contentType ?? 'application/octet-stream'
+  const custom = obj.customMetadata ?? {}
+  const originalFilename = (custom.originalFilename as string) || payload.fileId
+  const asciiFilename = originalFilename.replace(/[^\x20-\x7E]/g, '_')
+
+  c.res.headers.set('Content-Type', contentType)
+  c.res.headers.set('Content-Length', String(obj.size))
+  c.res.headers.set('Content-Disposition', `attachment; filename="${asciiFilename}"; filename*=UTF-8''${encodeURIComponent(originalFilename)}`)
+  c.res.headers.set('Cache-Control', 'no-store')
+  c.res.headers.set('X-Content-Type-Options', 'nosniff')
+  c.res.headers.set('X-Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'")
+  c.res.headers.set('Referrer-Policy', 'no-referrer')
+
+  return c.newResponse(body, 200)
+})
+
+const statsRoute = createRoute({
+  method: 'get',
+  path: '/api/stats',
+  tags: ['통계'],
+  summary: '저장소 통계 (관리자 전용)',
+  description: '전체 파일 개수, 총 용량 등 버킷 통계를 조회합니다.',
+  security: [{ bearerAuth: [] }],
+  request: {},
+  responses: {
+    200: { content: { 'application/json': { schema: z.object({ success: z.literal(true), data: statsDataSchema }) } }, description: '통계 정보' },
+    401: { content: { 'application/json': { schema: errorResponseSchema } }, description: '인증 실패' },
+    403: { content: { 'application/json': { schema: errorResponseSchema } }, description: '관리자 권한 필요' },
+  },
+})
+
+app.openapi(statsRoute, async (c) => {
+  const authErr = await checkAuth(c, true)
+  if (authErr) return authErr as any
+
+  const stats = await getBucketStats(c.env.FILE_BUCKET)
+  return c.json({ success: true as const, data: stats }, 200)
+})
+
+const healthRoute = createRoute({
+  method: 'get',
+  path: '/api/health',
+  tags: ['시스템'],
+  summary: '헬스 체크',
+  description: '서버와 R2 연결 상태를 확인합니다.',
+  request: {},
+  responses: {
+    200: { content: { 'application/json': { schema: z.object({ status: z.literal('ok'), r2: z.enum(['connected', 'error']), uptime: z.number() }) } }, description: '상태 확인' },
+  },
+})
+
+app.openapi(healthRoute, async (c) => {
+  let r2Status: 'connected' | 'error' = 'connected'
+  try {
+    await c.env.FILE_BUCKET.list({ limit: 1 })
+  } catch {
+    r2Status = 'error'
+  }
+
+  const ip = c.req.header('CF-Connecting-IP') || 'unknown'
+  logEvent('health', ip)
+
+  return c.json({ status: 'ok' as const, r2: r2Status, uptime: Math.floor(Date.now() / 1000) }, 200)
 })
 
 configureOpenApi(app)

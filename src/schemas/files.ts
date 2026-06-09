@@ -38,3 +38,24 @@ export const queryParamsSchema = z.object({
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).optional().default(20),
 })
+
+export const extendDataSchema = z.object({
+  id: z.string(),
+  newExpireAt: z.string().datetime(),
+  extended: z.boolean(),
+})
+
+export const shareDataSchema = z.object({
+  token: z.string(),
+  url: z.string(),
+  expiresAt: z.string().datetime(),
+})
+
+export const statsDataSchema = z.object({
+  totalFiles: z.number().int(),
+  totalSize: z.number().int(),
+  averageSize: z.number().int(),
+  oldestUpload: z.string().datetime().nullable(),
+  newestUpload: z.string().datetime().nullable(),
+  expiringSoon: z.number().int(),
+})

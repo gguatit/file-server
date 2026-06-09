@@ -7,7 +7,7 @@ let lastCleanup = 0
 export const rateLimit = (): MiddlewareHandler<{ Bindings: Env }> => {
   return async (c, next) => {
     const path = new URL(c.req.url).pathname
-    if (path.startsWith('/admin') || path === '/api/docs' || path === '/api/openapi') {
+    if (path.startsWith('/admin') || path === '/api/docs' || path === '/api/openapi' || path === '/api/health' || path.startsWith('/api/dl/')) {
       return next()
     }
 

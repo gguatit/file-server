@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import type { Env } from '../lib/types'
 import { verifyAdminPassword, createAdminToken } from '../services/admin'
 import { adminPageAuth } from '../middleware/admin-auth'
+import { logEvent } from '../services/logger'
 
 const app = new Hono<{ Bindings: Env; Variables: { adminToken: string } }>()
 
@@ -16,7 +17,7 @@ const loginHTML = `<!DOCTYPE html>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { font-family: system-ui, -apple-system, sans-serif; background: #0d1117; color: #c9d1d9; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-    .login-box { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 40px; width: 100%; max-width: 380px; }
+    .login-box { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 40px; width: 100%; max-width: 380px; margin: 16px; }
     h1 { font-size: 20px; margin-bottom: 8px; color: #f0f6fc; }
     p { font-size: 13px; color: #8b949e; margin-bottom: 24px; }
     label { display: block; font-size: 13px; margin-bottom: 4px; color: #c9d1d9; }
@@ -65,6 +66,9 @@ const loginHTML = `<!DOCTYPE html>
 
 app.get('/admin/login', (c) => {
   c.header('Cache-Control', 'no-store, no-cache, must-revalidate')
+  c.header('X-Content-Type-Options', 'nosniff')
+  c.header('X-Frame-Options', 'DENY')
+  c.header('Referrer-Policy', 'no-referrer')
   return c.html(loginHTML)
 })
 
@@ -80,15 +84,18 @@ app.post('/admin/login', async (c) => {
     return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: '아이디와 비밀번호를 입력하세요.' } }, 400)
   }
 
+  const ip = c.req.header('CF-Connecting-IP') || 'unknown'
+
   if (body.id !== c.env.ADMIN_ID) {
+    logEvent('login_failed', ip, { adminId: body.id })
     await new Promise((r) => setTimeout(r, 500))
     return c.json({ success: false, error: { code: 'UNAUTHORIZED', message: '아이디 또는 비밀번호가 올바르지 않습니다.' } }, 401)
   }
 
-  const ip = c.req.header('CF-Connecting-IP') || 'unknown'
   const now = Date.now()
   const attempt = loginAttempts.get(ip)
   if (attempt && now < attempt.resetAt && attempt.count >= 5) {
+    logEvent('login_failed', ip, { adminId: body.id, details: 'rate_limited' })
     return c.json({ success: false, error: { code: 'RATE_LIMITED', message: '로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요.' } }, 429)
   }
 
@@ -99,6 +106,7 @@ app.post('/admin/login', async (c) => {
     } else {
       attempt.count++
     }
+    logEvent('login_failed', ip, { adminId: body.id })
     await new Promise((r) => setTimeout(r, 500))
     return c.json({ success: false, error: { code: 'UNAUTHORIZED', message: '아이디 또는 비밀번호가 올바르지 않습니다.' } }, 401)
   }
@@ -106,6 +114,7 @@ app.post('/admin/login', async (c) => {
   loginAttempts.delete(ip)
 
   const token = await createAdminToken(body.id, c.env.ADMIN_TOKEN_SECRET)
+  logEvent('login', ip, { adminId: body.id })
 
   c.header(
     'Set-Cookie',
@@ -140,39 +149,44 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
     .btn-refresh { padding: 5px 12px; background: #21262d; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; font-size: 12px; cursor: pointer; }
     .btn-refresh:hover { background: #30363d; }
     .toolbar { padding: 12px 24px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    .search-box { flex: 1; min-width: 200px; max-width: 360px; padding: 7px 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; font-size: 13px; outline: none; }
+    .search-box { flex: 1; min-width: 160px; max-width: 360px; padding: 7px 12px; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; font-size: 13px; outline: none; }
     .search-box:focus { border-color: #58a6ff; }
     .page-size-select { padding: 6px 8px; background: #0d1117; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; font-size: 13px; cursor: pointer; }
     .stats { padding: 0 24px 12px; display: flex; gap: 12px; flex-wrap: wrap; }
-    .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px 16px; min-width: 140px; }
+    .stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 12px 16px; min-width: 130px; flex: 1; }
     .stat-card .label { font-size: 11px; color: #8b949e; margin-bottom: 2px; }
     .stat-card .value { font-size: 18px; color: #f0f6fc; font-weight: 600; }
-    .upload-area { margin: 0 24px 12px; padding: 16px; background: #161b22; border: 1px dashed #30363d; border-radius: 6px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-    .upload-area span { font-size: 13px; color: #8b949e; white-space: nowrap; }
-    .upload-area input[type=file] { color: #c9d1d9; font-size: 13px; flex: 1; min-width: 200px; }
+    .stat-card .sub { font-size: 11px; color: #8b949e; margin-top: 2px; }
+    .upload-area { margin: 0 24px 12px; padding: 20px; background: #161b22; border: 2px dashed #30363d; border-radius: 6px; text-align: center; transition: border-color 0.2s; }
+    .upload-area.drag-over { border-color: #58a6ff; background: #1a2332; }
+    .upload-area span { font-size: 13px; color: #8b949e; display: block; margin-bottom: 6px; }
+    .upload-area input[type=file] { color: #c9d1d9; font-size: 13px; }
     .upload-area input[type=file]::file-selector-button { padding: 5px 12px; background: #21262d; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; cursor: pointer; margin-right: 8px; }
-    .btn-upload { padding: 6px 14px; background: #238636; border: none; border-radius: 4px; color: #fff; font-size: 13px; cursor: pointer; white-space: nowrap; }
+    .btn-upload { padding: 6px 14px; background: #238636; border: none; border-radius: 4px; color: #fff; font-size: 13px; cursor: pointer; white-space: nowrap; margin-left: 8px; }
     .btn-upload:hover { background: #2ea043; }
     .btn-upload:disabled { opacity: 0.4; cursor: default; }
-    .upload-progress { font-size: 12px; color: #8b949e; }
+    .upload-progress { font-size: 12px; color: #8b949e; margin-top: 8px; }
     .file-list { margin: 0 24px; }
-    .table-header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .table-header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 8px; }
     h3 { font-size: 14px; color: #f0f6fc; }
-    .action-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+    .action-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .btn-danger { padding: 5px 12px; background: #da3633; border: none; border-radius: 4px; color: #fff; font-size: 12px; cursor: pointer; }
     .btn-danger:hover { background: #f85149; }
     .btn-danger:disabled { opacity: 0.4; cursor: default; }
-    table { width: 100%; border-collapse: collapse; }
+    .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    table { width: 100%; border-collapse: collapse; min-width: 700px; }
     th, td { text-align: left; padding: 7px 10px; font-size: 13px; border-bottom: 1px solid #21262d; }
     th { color: #8b949e; font-weight: 600; white-space: nowrap; }
     td { color: #c9d1d9; }
     .filename-link { color: #58a6ff; cursor: pointer; text-decoration: underline; }
     .filename-link:hover { color: #79c0ff; }
     .expiring { color: #f85149 !important; font-weight: 600; }
-    .btn-delete { padding: 4px 10px; background: #da3633; border: none; border-radius: 4px; color: #fff; font-size: 12px; cursor: pointer; }
-    .btn-delete:hover { background: #f85149; }
-    .btn-copy { padding: 4px 10px; background: #21262d; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; font-size: 12px; cursor: pointer; margin-right: 4px; }
-    .btn-copy:hover { background: #30363d; }
+    .btn-sm { padding: 3px 8px; border: none; border-radius: 3px; color: #fff; font-size: 11px; cursor: pointer; margin-right: 2px; }
+    .btn-sm:hover { opacity: 0.85; }
+    .btn-copy-sm { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; }
+    .btn-share-sm { background: #1f6feb; }
+    .btn-extend-sm { background: #9e6a03; }
+    .btn-delete-sm { background: #da3633; }
     .empty { text-align: center; padding: 40px; color: #8b949e; font-size: 14px; }
     .pagination { display: flex; justify-content: center; gap: 8px; margin: 12px 0; }
     .pagination button { padding: 5px 14px; background: #21262d; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; font-size: 13px; cursor: pointer; }
@@ -180,15 +194,43 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
     .pagination button:disabled { opacity: 0.4; cursor: default; }
     .modal-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 100; justify-content: center; align-items: center; }
     .modal-overlay.show { display: flex; }
-    .modal { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 24px; max-width: 480px; width: 90%; }
+    .modal { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 24px; max-width: 520px; width: 90%; max-height: 90vh; overflow-y: auto; }
     .modal h3 { font-size: 16px; color: #f0f6fc; margin-bottom: 16px; }
-    .modal dl { display: grid; grid-template-columns: 100px 1fr; gap: 8px 12px; font-size: 13px; }
+    .modal dl { display: grid; grid-template-columns: 90px 1fr; gap: 8px 12px; font-size: 13px; }
     .modal dt { color: #8b949e; text-align: right; }
     .modal dd { color: #c9d1d9; word-break: break-all; }
-    .modal .modal-actions { margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end; }
+    .modal .modal-actions { margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
     .modal .btn { padding: 6px 14px; border: none; border-radius: 4px; font-size: 13px; cursor: pointer; }
     .modal .btn-primary { background: #238636; color: #fff; }
     .modal .btn-secondary { background: #21262d; border: 1px solid #30363d; color: #c9d1d9; }
+    .preview-img { max-width: 100%; max-height: 300px; display: block; margin: 12px auto; border-radius: 4px; }
+    .spinner { display: inline-block; width: 20px; height: 20px; border: 2px solid #30363d; border-top-color: #58a6ff; border-radius: 50%; animation: spin 0.6s linear infinite; vertical-align: middle; margin-right: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .toast-container { position: fixed; bottom: 16px; right: 16px; z-index: 200; display: flex; flex-direction: column; gap: 8px; }
+    .toast { padding: 10px 16px; border-radius: 6px; font-size: 13px; color: #fff; min-width: 200px; max-width: 360px; box-shadow: 0 4px 16px rgba(0,0,0,0.5); animation: slideIn 0.25s ease; }
+    .toast-success { background: #238636; }
+    .toast-error { background: #da3633; }
+    .toast-info { background: #1f6feb; }
+    @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+    @media (max-width: 768px) {
+      .header { padding: 10px 16px; }
+      .header h1 { font-size: 14px; }
+      .toolbar { padding: 12px 16px; }
+      .stats { padding: 0 16px 12px; gap: 8px; }
+      .stat-card { min-width: 100px; padding: 10px 12px; }
+      .stat-card .value { font-size: 15px; }
+      .upload-area { margin: 0 16px 12px; padding: 14px; }
+      .file-list { margin: 0 16px; }
+      th, td { padding: 5px 8px; font-size: 12px; }
+      .btn-sm { padding: 3px 6px; font-size: 10px; }
+      .modal { padding: 16px; }
+    }
+    @media (max-width: 480px) {
+      .header-links { width: 100%; justify-content: flex-end; }
+      .upload-area { text-align: left; }
+      .upload-area input[type=file] { width: 100%; }
+      .btn-upload { margin-left: 0; margin-top: 6px; width: 100%; }
+    }
   </style>
 </head>
 <body>
@@ -208,15 +250,25 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       <option value="100">100개</option>
     </select>
   </div>
-  <div class="upload-area">
-    <span>파일 업로드:</span>
-    <input type="file" id="uploadFileInput" />
-    <button class="btn-upload" id="uploadBtn" onclick="uploadFile()">업로드</button>
-    <span class="upload-progress" id="uploadProgress"></span>
+  <div class="upload-area" id="uploadArea">
+    <span>파일을 여기에 끌어다 놓거나 클릭하여 선택하세요 (여러 파일 가능)</span>
+    <input type="file" id="uploadFileInput" multiple />
+    <button class="btn-upload" id="uploadBtn" onclick="uploadFiles()">업로드</button>
+    <div class="upload-progress" id="uploadProgress"></div>
   </div>
   <div class="stats">
     <div class="stat-card">
-      <div class="label">현재 페이지 파일</div>
+      <div class="label">전체 파일</div>
+      <div class="value" id="totalFileCount">-</div>
+      <div class="sub" id="expiringCount"></div>
+    </div>
+    <div class="stat-card">
+      <div class="label">전체 용량</div>
+      <div class="value" id="totalStorageSize">-</div>
+      <div class="sub" id="avgSize"></div>
+    </div>
+    <div class="stat-card">
+      <div class="label">페이지 파일</div>
       <div class="value" id="fileCount">-</div>
     </div>
     <div class="stat-card">
@@ -231,26 +283,29 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
         <button class="btn-danger" id="deleteSelectedBtn" disabled onclick="deleteSelected()">선택 삭제</button>
       </div>
     </div>
-    <table>
-      <thead>
-        <tr>
-          <th><input type="checkbox" id="selectAll" onchange="toggleSelectAll()" /></th>
-          <th>파일명</th>
-          <th>크기</th>
-          <th>업로드</th>
-          <th>만료</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody id="fileTableBody">
-        <tr><td colspan="6" class="empty">불러오는 중...</td></tr>
-      </tbody>
-    </table>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th><input type="checkbox" id="selectAll" onchange="toggleSelectAll()" /></th>
+            <th>파일명</th>
+            <th>크기</th>
+            <th>업로드</th>
+            <th>만료</th>
+            <th>작업</th>
+          </tr>
+        </thead>
+        <tbody id="fileTableBody">
+          <tr><td colspan="6" class="empty"><span class="spinner"></span>불러오는 중...</td></tr>
+        </tbody>
+      </table>
+    </div>
     <div class="pagination" id="pagination"></div>
   </div>
   <div class="modal-overlay" id="modalOverlay">
     <div class="modal">
       <h3>파일 상세 정보</h3>
+      <div id="previewContainer"></div>
       <dl>
         <dt>파일 ID</dt><dd id="modalId">-</dd>
         <dt>파일명</dt><dd id="modalName">-</dd>
@@ -265,13 +320,16 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       </div>
     </div>
   </div>
+  <div class="toast-container" id="toastContainer"></div>
   <script>
     var ADMIN_TOKEN = ${JSON.stringify(token)};
     var cursor = null;
     var prevCursors = [];
     var allItems = [];
+    var statsCache = null;
 
     function formatSize(bytes) {
+      if (bytes == null) return '-';
       if (bytes < 1024) return bytes + ' B';
       if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
       if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
@@ -288,6 +346,16 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       return new Date(expireAt).getTime() - Date.now() < 3600000;
     }
 
+    function showToast(msg, type) {
+      type = type || 'info';
+      var container = document.getElementById('toastContainer');
+      var el = document.createElement('div');
+      el.className = 'toast toast-' + type;
+      el.textContent = msg;
+      container.appendChild(el);
+      setTimeout(function() { el.remove(); }, 3000);
+    }
+
     async function api(path, opts) {
       opts = opts || {};
       opts.headers = opts.headers || {};
@@ -298,6 +366,25 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
 
     function getPageLimit() {
       return parseInt(document.getElementById('pageSizeSelect').value, 10) || 20;
+    }
+
+    async function loadStats() {
+      try {
+        var res = await api('/api/stats');
+        var data = await res.json();
+        if (data.success && data.data) {
+          statsCache = data.data;
+          document.getElementById('totalFileCount').textContent = data.data.totalFiles;
+          document.getElementById('totalStorageSize').textContent = formatSize(data.data.totalSize);
+          document.getElementById('avgSize').textContent = '평균 ' + formatSize(data.data.averageSize);
+          if (data.data.expiringSoon > 0) {
+            document.getElementById('expiringCount').textContent = data.data.expiringSoon + '개 1시간 이내 만료';
+            document.getElementById('expiringCount').style.color = '#f85149';
+          } else {
+            document.getElementById('expiringCount').textContent = '';
+          }
+        }
+      } catch (e) {}
     }
 
     async function loadFiles(c) {
@@ -355,8 +442,10 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
           '<td>' + formatTime(f.uploadedAt) + '</td>' +
           '<td' + expClass + '>' + formatTime(f.expireAt) + '</td>' +
           '<td>' +
-            '<button class="btn-copy" onclick=\\'copyUrl(' + safeId + ', ' + safeName + ')\\'">복사</button>' +
-            '<button class="btn-delete" onclick=\\'deleteFile(' + safeId + ')\\'">삭제</button>' +
+            '<button class="btn-sm btn-copy-sm" onclick=\\'copyUrl(' + safeId + ', ' + safeName + ')\\'" title="URL 복사">URL</button>' +
+            '<button class="btn-sm btn-share-sm" onclick=\\'shareFile(' + safeId + ')\\'" title="공유 링크">공유</button>' +
+            '<button class="btn-sm btn-extend-sm" onclick=\\'extendFile(' + safeId + ')\\'" title="만료 연장">연장</button>' +
+            '<button class="btn-sm btn-delete-sm" onclick=\\'deleteFile(' + safeId + ')\\'" title="삭제">삭제</button>' +
           '</td>' +
         '</tr>';
       }).join('');
@@ -397,40 +486,50 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
         if (!data.success) errors++;
       }
       btn.textContent = '선택 삭제';
-      if (errors) alert(errors + '개 파일 삭제 실패');
+      if (errors) showToast(errors + '개 파일 삭제 실패', 'error');
+      else showToast('삭제 완료', 'success');
       refresh();
     }
 
-    async function uploadFile() {
+    async function uploadFiles() {
       var input = document.getElementById('uploadFileInput');
-      var file = input.files[0];
-      if (!file) { alert('파일을 선택하세요.'); return; }
+      var files = input.files;
+      if (!files.length) { showToast('파일을 선택하세요.', 'error'); return; }
       var btn = document.getElementById('uploadBtn');
       var progress = document.getElementById('uploadProgress');
       btn.disabled = true;
-      progress.textContent = '업로드 중...';
-      try {
-        var form = new FormData();
-        form.append('file', file);
-        var res = await api('/api/files', { method: 'POST', body: form });
-        var data = await res.json();
-        if (data.success) {
-          progress.textContent = '업로드 완료: ' + file.name;
-          input.value = '';
-          refresh();
-        } else {
-          progress.textContent = '실패: ' + (data.error && data.error.message || '');
+      var total = files.length;
+      var successCount = 0;
+      var failCount = 0;
+      for (var i = 0; i < total; i++) {
+        progress.innerHTML = '<span class="spinner"></span>업로드 중... (' + (i + 1) + '/' + total + ')';
+        try {
+          var form = new FormData();
+          form.append('file', files[i]);
+          var res = await api('/api/files', { method: 'POST', body: form });
+          var data = await res.json();
+          if (data.success) {
+            successCount++;
+          } else {
+            failCount++;
+          }
+        } catch (e) {
+          failCount++;
         }
-      } catch (e) {
-        progress.textContent = '업로드 오류';
       }
       btn.disabled = false;
+      progress.textContent = '';
+      input.value = '';
+      if (failCount === 0) showToast(successCount + '개 파일 업로드 완료', 'success');
+      else showToast(successCount + '개 성공, ' + failCount + '개 실패', failCount === total ? 'error' : 'info');
+      refresh();
     }
 
     function refresh() {
       cursor = null;
       prevCursors = [];
       loadFiles(null);
+      loadStats();
     }
 
     function changePageSize() {
@@ -438,7 +537,7 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
     }
 
     function esc(s) {
-      return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
     }
 
     function goNext() {
@@ -454,17 +553,58 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       if (!confirm('삭제하시겠습니까?')) return;
       var res = await api('/api/files/' + id, { method: 'DELETE' });
       var data = await res.json();
-      if (data.success) { refresh(); }
-      else { alert('실패: ' + (data.error && data.error.message || '오류')); }
+      if (data.success) { showToast('삭제 완료', 'success'); refresh(); }
+      else { showToast('실패: ' + (data.error && data.error.message || '오류'), 'error'); }
     }
 
     function copyUrl(id, name) {
       var url = 'https://file.kalpha.kr/api/files/' + id;
       navigator.clipboard.writeText(url).then(function() {
-        alert('URL 복사됨\\n' + name);
+        showToast('URL 복사됨: ' + name, 'success');
       }).catch(function() {
         prompt('URL 복사:', url);
       });
+    }
+
+    async function shareFile(id) {
+      var hours = prompt('공유 링크 유효 시간 (시간, 기본 1시간):', '1');
+      if (!hours) return;
+      try {
+        var res = await api('/api/files/' + id + '/share', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ expiryHours: parseInt(hours, 10) || 1 }),
+        });
+        var data = await res.json();
+        if (data.success && data.data) {
+          navigator.clipboard.writeText(data.data.url).then(function() {
+            showToast('공유 링크 복사됨 (유효: ' + hours + '시간)', 'success');
+          }).catch(function() {
+            prompt('공유 링크:', data.data.url);
+          });
+        } else {
+          showToast('공유 링크 생성 실패', 'error');
+        }
+      } catch (e) {
+        showToast('공유 링크 생성 실패', 'error');
+      }
+    }
+
+    async function extendFile(id) {
+      var hours = prompt('연장할 시간 (최대 168시간):', '24');
+      if (!hours) return;
+      try {
+        var res = await api('/api/files/' + id + '/extend', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hours: parseInt(hours, 10) || 24 }),
+        });
+        var data = await res.json();
+        if (data.success) { showToast('만료 시간 ' + hours + '시간 연장됨', 'success'); refresh(); }
+        else { showToast('연장 실패: ' + (data.error && data.error.message || '오류'), 'error'); }
+      } catch (e) {
+        showToast('연장 실패', 'error');
+      }
     }
 
     var currentFileId = null;
@@ -473,11 +613,12 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       currentFileId = id;
       document.getElementById('modalOverlay').classList.add('show');
       document.getElementById('modalId').textContent = id;
-      document.getElementById('modalName').textContent = '불러오는 중...';
+      document.getElementById('modalName').textContent = '<span class="spinner"></span>불러오는 중...';
       document.getElementById('modalType').textContent = '-';
       document.getElementById('modalSize').textContent = '-';
       document.getElementById('modalUploaded').textContent = '-';
       document.getElementById('modalExpire').textContent = '-';
+      document.getElementById('previewContainer').innerHTML = '';
       try {
         var res = await api('/api/files/' + id + '/info');
         var data = await res.json();
@@ -490,6 +631,13 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
           document.getElementById('modalExpire').textContent = formatTime(m.expireAt);
           if (isExpiringSoon(m.expireAt)) document.getElementById('modalExpire').className = 'expiring';
           else document.getElementById('modalExpire').className = '';
+          if (m.contentType && m.contentType.indexOf('image/') === 0) {
+            var img = document.createElement('img');
+            img.className = 'preview-img';
+            img.src = '/api/files/' + id;
+            img.onerror = function() { img.style.display = 'none'; };
+            document.getElementById('previewContainer').appendChild(img);
+          }
         } else {
           document.getElementById('modalName').textContent = '오류';
         }
@@ -510,7 +658,30 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       if (e.target === this) closeModal();
     });
 
+    var uploadArea = document.getElementById('uploadArea');
+    uploadArea.addEventListener('dragover', function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      uploadArea.classList.add('drag-over');
+    });
+    uploadArea.addEventListener('dragleave', function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      uploadArea.classList.remove('drag-over');
+    });
+    uploadArea.addEventListener('drop', function(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      uploadArea.classList.remove('drag-over');
+      var dt = e.dataTransfer;
+      if (dt && dt.files && dt.files.length) {
+        document.getElementById('uploadFileInput').files = dt.files;
+        uploadFiles();
+      }
+    });
+
     loadFiles(null);
+    loadStats();
   </script>
 </body>
 </html>`
@@ -518,6 +689,10 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
 app.get('/admin', adminPageAuth(), (c) => {
   const token = c.get('adminToken')
   c.header('Cache-Control', 'no-store, no-cache, must-revalidate')
+  c.header('X-Content-Type-Options', 'nosniff')
+  c.header('X-Frame-Options', 'DENY')
+  c.header('Referrer-Policy', 'no-referrer')
+  c.header('Permissions-Policy', 'interest-cohort=()')
   return c.html(dashboardHTML(token))
 })
 

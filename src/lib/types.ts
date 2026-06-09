@@ -22,6 +22,12 @@ export interface PaginatedList<T> {
   hasMore: boolean
 }
 
+export interface ShareInfo {
+  token: string
+  url: string
+  expiresAt: string
+}
+
 export interface Env {
   FILE_BUCKET: R2Bucket
   API_KEY: string
@@ -31,4 +37,5 @@ export interface Env {
   MAX_UPLOAD_SIZE: string
   RATE_LIMIT_PER_MINUTE: string
   ALLOWED_ORIGIN: string
+  SHARE_BASE_URL: string
 }
