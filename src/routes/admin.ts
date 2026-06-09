@@ -495,8 +495,10 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       refresh();
     }
 
-    var CHUNK_SIZE = 20 * 1024 * 1024;
-    var PARALLEL_CHUNKS = 2;
+    var CHUNK_SIZE_MIN = 5 * 1024 * 1024;
+    var CHUNK_SIZE_MAX = 10 * 1024 * 1024;
+    var CHUNK_SIZE_DEFAULT = 10 * 1024 * 1024;
+    var PARALLEL_CHUNKS = 3;
 
     function formatUploadProgress(uploaded, total) {
       if (total < 1048576) return formatSize(uploaded) + ' / ' + formatSize(total);
@@ -514,6 +516,32 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       bar.style.display = 'none';
     }
 
+    async function measureChunkSpeed(uploadId, fileId, file, totalParts) {
+      var start = 0;
+      var end = Math.min(CHUNK_SIZE_DEFAULT, file.size);
+      var chunk = file.slice(start, end);
+      var chunkSize = end - start;
+      var t0 = Date.now();
+      var partUrl = '/api/files/chunked/' + uploadId + '/part?partNumber=1&fileId=' + fileId;
+      try {
+        var res = await api(partUrl, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: chunk });
+        var data = await res.json();
+        if (!data.success) throw new Error('측정 실패');
+        var elapsed = Date.now() - t0;
+        var speed = (chunkSize / (1024 * 1024)) / (elapsed / 1000);
+        console.log('[upload] 네트워크 측정: ' + formatSize(chunkSize) + ' 전송 ' + elapsed + 'ms, 속도 ' + speed.toFixed(1) + 'MB/s');
+        if (speed > 5) return { ok: true, chunkSize: CHUNK_SIZE_MIN };
+        if (speed > 1) {
+          var mid = Math.round((CHUNK_SIZE_MIN + CHUNK_SIZE_MAX) / 2 / (1024 * 1024)) * 1024 * 1024;
+          return { ok: true, chunkSize: mid };
+        }
+        return { ok: true, chunkSize: CHUNK_SIZE_MAX };
+      } catch (e) {
+        console.log('[upload] 속도 측정 실패, 기본값 사용');
+        return { ok: false, chunkSize: CHUNK_SIZE_DEFAULT };
+      }
+    }
+
     async function uploadChunked(file) {
       console.log('[upload] 청크 업로드 시작:', file.name, formatSize(file.size));
       showProgressBar();
@@ -528,19 +556,34 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       if (!initData.success) throw new Error(initData.error && initData.error.message || '초기화 실패');
       var uploadId = initData.data.uploadId;
       var fileId = initData.data.fileId;
-      console.log('[upload] uploadId:', uploadId, 'fileId:', fileId);
-      var totalParts = Math.ceil(file.size / CHUNK_SIZE);
-      console.log('[upload] 총 청크 수:', totalParts);
-      var uploadedBytes = 0;
-      var partIndex = 0;
 
-      while (partIndex < totalParts) {
+      var dynamicChunkSize = CHUNK_SIZE_DEFAULT;
+      if (file.size > CHUNK_SIZE_DEFAULT) {
+        var measure = await measureChunkSpeed(uploadId, fileId, file);
+        dynamicChunkSize = measure.chunkSize;
+        if (measure.ok) {
+          console.log('[upload] 첫 청크 완료, 조정된 크기:', formatSize(dynamicChunkSize));
+          var uploadedAfterMeasure = dynamicChunkSize;
+          var pct = Math.round((uploadedAfterMeasure / file.size) * 100);
+          document.getElementById('uploadProgressBar').value = pct;
+          document.getElementById('uploadProgress').innerHTML = formatUploadProgress(uploadedAfterMeasure, file.size) + ' (' + pct + '%)';
+        }
+      } else {
+        console.log('[upload] 작은 파일, 청크 크기:', formatSize(dynamicChunkSize));
+      }
+
+      var totalParts = Math.ceil(file.size / dynamicChunkSize);
+      console.log('[upload] 총 청크 수:', totalParts, '크기:', formatSize(dynamicChunkSize));
+      var uploadedBytes = (dynamicChunkSize < file.size && measure.ok) ? dynamicChunkSize : 0;
+      var startPart = uploadedBytes > 0 ? 1 : 0;
+
+      while (startPart < totalParts) {
         var batch = [];
-        var batchEnd = Math.min(partIndex + PARALLEL_CHUNKS, totalParts);
-        for (var pi = partIndex; pi < batchEnd; pi++) {
+        var batchEnd = Math.min(startPart + PARALLEL_CHUNKS, totalParts);
+        for (var pi = startPart; pi < batchEnd; pi++) {
           batch.push((function(p) {
-            var start = p * CHUNK_SIZE;
-            var end = Math.min(start + CHUNK_SIZE, file.size);
+            var start = p * dynamicChunkSize;
+            var end = Math.min(start + dynamicChunkSize, file.size);
             var chunk = file.slice(start, end);
             var chunkSize = end - start;
             var partUrl = '/api/files/chunked/' + uploadId + '/part?partNumber=' + (p + 1) + '&fileId=' + fileId;
@@ -552,14 +595,13 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
                 uploadedBytes += chunkSize;
                 var pct = Math.round((uploadedBytes / file.size) * 100);
                 document.getElementById('uploadProgressBar').value = pct;
-                var progEl = document.getElementById('uploadProgress');
-                progEl.innerHTML = formatUploadProgress(uploadedBytes, file.size) + ' (' + pct + '%)';
+                document.getElementById('uploadProgress').innerHTML = formatUploadProgress(uploadedBytes, file.size) + ' (' + pct + '%)';
                 console.log('[upload] 청크 ' + (p + 1) + ' 완료, 진행률:', pct + '%');
               });
           })(pi));
         }
         await Promise.all(batch);
-        partIndex = batchEnd;
+        startPart = batchEnd;
       }
 
       console.log('[upload] complete 요청...');
@@ -578,8 +620,8 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
 
     async function uploadOneFile(file, idx, total) {
       console.log('[upload] 파일 ' + idx + '/' + total + ':', file.name, formatSize(file.size), 'type:', file.type);
-      if (file.size > CHUNK_SIZE) {
-        console.log('[upload] ' + formatSize(file.size) + ' > ' + formatSize(CHUNK_SIZE) + ' → 청크 업로드 사용');
+      if (file.size > CHUNK_SIZE_DEFAULT) {
+        console.log('[upload] ' + formatSize(file.size) + ' > ' + formatSize(CHUNK_SIZE_DEFAULT) + ' → 청크 업로드 사용');
         return uploadChunked(file);
       }
       console.log('[upload] 일반 업로드 사용');
