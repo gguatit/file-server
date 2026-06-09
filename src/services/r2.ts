@@ -1,6 +1,8 @@
-import type { R2Bucket, R2Object } from '@cloudflare/workers-types'
+import type { R2Bucket, R2Object, R2MultipartUpload } from '@cloudflare/workers-types'
 import { FILE_RETENTION_HOURS, MAX_FILENAME_LENGTH } from '../schemas/files'
 import type { FileMetadata, PaginatedList } from '../lib/types'
+
+const multipartStore = new Map<string, R2MultipartUpload>()
 
 export function generateFileId(): string {
   return crypto.randomUUID()
@@ -55,6 +57,80 @@ export async function uploadFile(
     uploadedAt: now.toISOString(),
     expireAt: expireAt.toISOString(),
     contentType: obj.httpMetadata?.contentType ?? metadata.contentType,
+  }
+}
+
+export async function initMultipartUpload(
+  bucket: R2Bucket,
+  key: string,
+  metadata: { originalFilename: string; contentType?: string },
+): Promise<{ uploadId: string } | null> {
+  const now = new Date()
+  const expireAt = computeExpireAt()
+  const safeName = metadata.originalFilename.slice(0, MAX_FILENAME_LENGTH)
+
+  const mpu = await bucket.createMultipartUpload(key, {
+    httpMetadata: {
+      contentType: metadata.contentType ?? 'application/octet-stream',
+    },
+    customMetadata: {
+      originalFilename: safeName,
+      uploadedAt: now.toISOString(),
+      expireAt: expireAt.toISOString(),
+    },
+  })
+
+  if (!mpu) return null
+
+  multipartStore.set(key + ':' + mpu.uploadId, mpu)
+  return { uploadId: mpu.uploadId }
+}
+
+export async function uploadMultipartPart(
+  key: string,
+  uploadId: string,
+  partNumber: number,
+  body: ArrayBuffer,
+): Promise<boolean> {
+  const id = key + ':' + uploadId
+  let mpu = multipartStore.get(id)
+  if (!mpu) return false
+
+  try {
+    await mpu.uploadPart(partNumber, body)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function completeMultipartUpload(
+  key: string,
+  uploadId: string,
+): Promise<R2Object | null> {
+  const id = key + ':' + uploadId
+  const mpu = multipartStore.get(id)
+  if (!mpu) return null
+
+  try {
+    const obj = await mpu.complete([])
+    multipartStore.delete(id)
+    return obj
+  } catch {
+    return null
+  }
+}
+
+export function getMultipartUpload(uploadId: string, key: string): R2MultipartUpload | undefined {
+  return multipartStore.get(key + ':' + uploadId)
+}
+
+export function abortMultipartUpload(uploadId: string, key: string): void {
+  const id = key + ':' + uploadId
+  const mpu = multipartStore.get(id)
+  if (mpu) {
+    mpu.abort().catch(() => {})
+    multipartStore.delete(id)
   }
 }
 

@@ -491,6 +491,51 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       refresh();
     }
 
+    var CHUNK_SIZE = 50 * 1024 * 1024;
+
+    async function uploadChunked(file) {
+      var initRes = await api('/api/files/chunked/init', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: file.name, totalSize: file.size, contentType: file.type }),
+      });
+      var initData = await initRes.json();
+      if (!initData.success) throw new Error(initData.error && initData.error.message || '초기화 실패');
+      var uploadId = initData.data.uploadId;
+      var fileId = initData.data.fileId;
+      var totalParts = Math.ceil(file.size / CHUNK_SIZE);
+      for (var p = 0; p < totalParts; p++) {
+        var start = p * CHUNK_SIZE;
+        var end = Math.min(start + CHUNK_SIZE, file.size);
+        var chunk = file.slice(start, end);
+        var partRes = await api('/api/files/chunked/' + uploadId + '/part?partNumber=' + (p + 1) + '&fileId=' + fileId, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/octet-stream' },
+          body: chunk,
+        });
+        var partData = await partRes.json();
+        if (!partData.success) throw new Error('청크 업로드 실패');
+      }
+      var compRes = await api('/api/files/chunked/' + uploadId + '/complete?fileId=' + fileId, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      var compData = await compRes.json();
+      if (!compData.success) throw new Error('완료 실패');
+    }
+
+    async function uploadOneFile(file, idx, total) {
+      if (file.size > CHUNK_SIZE) {
+        return uploadChunked(file);
+      }
+      var form = new FormData();
+      form.append('file', file);
+      var res = await api('/api/files', { method: 'POST', body: form });
+      var data = await res.json();
+      if (!data.success) throw new Error(data.error && data.error.message || '업로드 실패');
+    }
+
     async function uploadFiles() {
       var input = document.getElementById('uploadFileInput');
       var files = input.files;
@@ -504,15 +549,8 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       for (var i = 0; i < total; i++) {
         progress.innerHTML = '<span class="spinner"></span>업로드 중... (' + (i + 1) + '/' + total + ')';
         try {
-          var form = new FormData();
-          form.append('file', files[i]);
-          var res = await api('/api/files', { method: 'POST', body: form });
-          var data = await res.json();
-          if (data.success) {
-            successCount++;
-          } else {
-            failCount++;
-          }
+          await uploadOneFile(files[i], i + 1, total);
+          successCount++;
         } catch (e) {
           failCount++;
         }

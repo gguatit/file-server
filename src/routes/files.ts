@@ -18,6 +18,9 @@ import {
   deleteFile,
   listFiles,
   generateFileId,
+  initMultipartUpload,
+  uploadMultipartPart,
+  completeMultipartUpload,
 } from '../services/r2'
 import { checkAuth } from '../middleware/auth'
 import { cors } from '../middleware/cors'
@@ -581,6 +584,108 @@ app.openapi(healthRoute, async (c) => {
   logEvent('health', ip)
 
   return c.json({ status: 'ok' as const, r2: r2Status, uptime: Math.floor(Date.now() / 1000) }, 200)
+})
+
+app.on(['POST'], '/api/files/chunked/init', cors(), rateLimit(), async (c) => {
+  const authErr = await checkAuth(c, false)
+  if (authErr) return authErr as any
+
+  let body: { filename?: string; totalSize?: number; contentType?: string } = {}
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'JSON 본문이 필요합니다.' } }, 400)
+  }
+
+  if (!body.filename || typeof body.totalSize !== 'number' || body.totalSize <= 0) {
+    return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'filename과 totalSize가 필요합니다.' } }, 400)
+  }
+
+  const maxUploadSize = parseInt(c.env.MAX_UPLOAD_SIZE || '262144000', 10)
+  if (body.totalSize > maxUploadSize) {
+    return c.json({ success: false, error: { code: 'FILE_TOO_LARGE', message: `파일 크기는 최대 ${Math.round(maxUploadSize / 1024 / 1024)}MB까지 허용됩니다.` } }, 413)
+  }
+
+  if (body.filename.length > MAX_FILENAME_LENGTH) {
+    return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: `파일명은 최대 ${MAX_FILENAME_LENGTH}자까지 허용됩니다.` } }, 400)
+  }
+
+  const fileId = generateFileId()
+  const result = await initMultipartUpload(c.env.FILE_BUCKET, fileId, {
+    originalFilename: body.filename,
+    contentType: body.contentType,
+  })
+
+  if (!result) {
+    return c.json({ success: false, error: { code: 'INTERNAL_ERROR', message: '멀티파트 업로드 초기화 실패' } }, 500)
+  }
+
+  return c.json({ success: true, data: { uploadId: result.uploadId, fileId } }, 200)
+})
+
+app.on(['POST'], '/api/files/chunked/:uploadId/part', cors(), rateLimit(), async (c) => {
+  const authErr = await checkAuth(c, false)
+  if (authErr) return authErr as any
+
+  const uploadId = c.req.param('uploadId')
+  const partNumber = parseInt(c.req.query('partNumber') || '0', 10)
+  if (!uploadId || partNumber <= 0) {
+    return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'uploadId와 partNumber 쿼리 파라미터가 필요합니다.' } }, 400)
+  }
+
+  let arrayBuffer: ArrayBuffer
+  try {
+    arrayBuffer = await c.req.raw.arrayBuffer()
+  } catch {
+    return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: '바이너리 데이터가 필요합니다.' } }, 400)
+  }
+
+  if (arrayBuffer.byteLength === 0) {
+    return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: '빈 청크입니다.' } }, 400)
+  }
+
+  const fileId = c.req.query('fileId') || ''
+  if (!fileId) {
+    return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'fileId 쿼리 파라미터가 필요합니다.' } }, 400)
+  }
+
+  const ok = await uploadMultipartPart(fileId, uploadId, partNumber, arrayBuffer)
+  if (!ok) {
+    return c.json({ success: false, error: { code: 'INTERNAL_ERROR', message: '청크 업로드 실패' } }, 500)
+  }
+
+  return c.json({ success: true, data: { part: partNumber, uploaded: true } }, 200)
+})
+
+app.on(['POST'], '/api/files/chunked/:uploadId/complete', cors(), rateLimit(), async (c) => {
+  const authErr = await checkAuth(c, false)
+  if (authErr) return authErr as any
+
+  const uploadId = c.req.param('uploadId')
+  const fileId = c.req.query('fileId') || ''
+  if (!uploadId || !fileId) {
+    return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'uploadId와 fileId가 필요합니다.' } }, 400)
+  }
+
+  const obj = await completeMultipartUpload(fileId, uploadId)
+  if (!obj) {
+    return c.json({ success: false, error: { code: 'INTERNAL_ERROR', message: '업로드 완료 처리 실패' } }, 500)
+  }
+
+  const ip = c.req.header('CF-Connecting-IP') || 'unknown'
+  logEvent('upload', ip, { fileId, fileName: obj.customMetadata?.originalFilename as string || fileId, fileSize: obj.size })
+
+  return c.json({
+    success: true,
+    data: {
+      id: fileId,
+      originalFilename: (obj.customMetadata?.originalFilename as string) || fileId,
+      size: obj.size,
+      uploadedAt: (obj.customMetadata?.uploadedAt as string) || new Date().toISOString(),
+      expireAt: (obj.customMetadata?.expireAt as string) || '',
+      contentType: obj.httpMetadata?.contentType ?? undefined,
+    },
+  }, 201)
 })
 
 configureOpenApi(app)
