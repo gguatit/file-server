@@ -634,15 +634,9 @@ app.on(['POST'], '/api/files/chunked/:uploadId/part', cors(), rateLimit(), async
     return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'uploadId와 partNumber 쿼리 파라미터가 필요합니다.' } }, 400)
   }
 
-  let arrayBuffer: ArrayBuffer
-  try {
-    arrayBuffer = await c.req.raw.arrayBuffer()
-  } catch {
+  const body = c.req.raw.body
+  if (!body) {
     return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: '바이너리 데이터가 필요합니다.' } }, 400)
-  }
-
-  if (arrayBuffer.byteLength === 0) {
-    return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: '빈 청크입니다.' } }, 400)
   }
 
   const fileId = c.req.query('fileId') || ''
@@ -650,8 +644,8 @@ app.on(['POST'], '/api/files/chunked/:uploadId/part', cors(), rateLimit(), async
     return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'fileId 쿼리 파라미터가 필요합니다.' } }, 400)
   }
 
-  console.log('[chunked-part] uploadId:', uploadId, 'fileId:', fileId, 'partNumber:', partNumber, 'size:', arrayBuffer.byteLength)
-  const ok = await uploadMultipartPart(c.env.FILE_BUCKET, fileId, uploadId, partNumber, arrayBuffer)
+  console.log('[chunked-part] uploadId:', uploadId, 'fileId:', fileId, 'partNumber:', partNumber)
+  const ok = await uploadMultipartPart(c.env.FILE_BUCKET, fileId, uploadId, partNumber, body)
   if (!ok) {
     console.error('[chunked-part] uploadMultipartPart failed')
     return c.json({ success: false, error: { code: 'INTERNAL_ERROR', message: '청크 업로드 실패' } }, 500)

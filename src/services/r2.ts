@@ -90,7 +90,7 @@ export async function uploadMultipartPart(
   key: string,
   uploadId: string,
   partNumber: number,
-  body: ArrayBuffer,
+  body: ReadableStream,
 ): Promise<boolean> {
   const mpu = bucket.resumeMultipartUpload(key, uploadId)
 

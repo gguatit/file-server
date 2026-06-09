@@ -166,6 +166,9 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
     .btn-upload:hover { background: #2ea043; }
     .btn-upload:disabled { opacity: 0.4; cursor: default; }
     .upload-progress { font-size: 12px; color: #8b949e; margin-top: 8px; }
+    progress[value]::-webkit-progress-bar { background: #21262d; border-radius: 4px; }
+    progress[value]::-webkit-progress-value { background: #238636; border-radius: 4px; }
+    progress[value]::-moz-progress-bar { background: #238636; border-radius: 4px; }
     .file-list { margin: 0 24px; }
     .table-header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 8px; }
     h3 { font-size: 14px; color: #f0f6fc; }
@@ -255,6 +258,7 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
     <input type="file" id="uploadFileInput" multiple />
     <button class="btn-upload" id="uploadBtn" onclick="uploadFiles()">업로드</button>
     <div class="upload-progress" id="uploadProgress"></div>
+    <progress id="uploadProgressBar" value="0" max="100" style="display:none;width:100%;height:8px;margin-top:8px;border-radius:4px;appearance:none"></progress>
   </div>
   <div class="stats">
     <div class="stat-card">
@@ -491,15 +495,28 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       refresh();
     }
 
-    var CHUNK_SIZE = 50 * 1024 * 1024;
+    var CHUNK_SIZE = 20 * 1024 * 1024;
+    var PARALLEL_CHUNKS = 2;
 
     function formatUploadProgress(uploaded, total) {
       if (total < 1048576) return formatSize(uploaded) + ' / ' + formatSize(total);
       return (uploaded / 1048576).toFixed(1) + 'MB / ' + (total / 1048576).toFixed(1) + 'MB';
     }
 
+    function showProgressBar() {
+      var bar = document.getElementById('uploadProgressBar');
+      bar.style.display = 'block';
+      bar.value = 0;
+    }
+
+    function hideProgressBar() {
+      var bar = document.getElementById('uploadProgressBar');
+      bar.style.display = 'none';
+    }
+
     async function uploadChunked(file) {
       console.log('[upload] 청크 업로드 시작:', file.name, formatSize(file.size));
+      showProgressBar();
       var initRes = await api('/api/files/chunked/init', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -515,26 +532,36 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       var totalParts = Math.ceil(file.size / CHUNK_SIZE);
       console.log('[upload] 총 청크 수:', totalParts);
       var uploadedBytes = 0;
-      for (var p = 0; p < totalParts; p++) {
-        var start = p * CHUNK_SIZE;
-        var end = Math.min(start + CHUNK_SIZE, file.size);
-        var chunk = file.slice(start, end);
-        var chunkSize = end - start;
-        var partUrl = '/api/files/chunked/' + uploadId + '/part?partNumber=' + (p + 1) + '&fileId=' + fileId;
-        console.log('[upload] 청크 ' + (p + 1) + '/' + totalParts, '크기:', formatSize(chunkSize));
-        var partRes = await api(partUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/octet-stream' },
-          body: chunk,
-        });
-        console.log('[upload] 청크 ' + (p + 1) + ' 응답:', partRes.status, partRes.statusText);
-        var partData = await partRes.json();
-        console.log('[upload] 청크 ' + (p + 1) + ' 데이터:', JSON.stringify(partData));
-        if (!partData.success) throw new Error('청크 업로드 실패 (part ' + (p + 1) + '): ' + (partData.error && partData.error.message || ''));
-        uploadedBytes += chunkSize;
-        var progEl = document.getElementById('uploadProgress');
-        progEl.innerHTML = '<span class="spinner"></span>' + formatUploadProgress(uploadedBytes, file.size);
+      var partIndex = 0;
+
+      while (partIndex < totalParts) {
+        var batch = [];
+        var batchEnd = Math.min(partIndex + PARALLEL_CHUNKS, totalParts);
+        for (var pi = partIndex; pi < batchEnd; pi++) {
+          batch.push((function(p) {
+            var start = p * CHUNK_SIZE;
+            var end = Math.min(start + CHUNK_SIZE, file.size);
+            var chunk = file.slice(start, end);
+            var chunkSize = end - start;
+            var partUrl = '/api/files/chunked/' + uploadId + '/part?partNumber=' + (p + 1) + '&fileId=' + fileId;
+            console.log('[upload] 청크 ' + (p + 1) + '/' + totalParts + ' 전송 (병렬)', formatSize(chunkSize));
+            return api(partUrl, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: chunk })
+              .then(function(r) { return r.json(); })
+              .then(function(d) {
+                if (!d.success) throw new Error('청크 ' + (p + 1) + ' 실패: ' + (d.error && d.error.message || ''));
+                uploadedBytes += chunkSize;
+                var pct = Math.round((uploadedBytes / file.size) * 100);
+                document.getElementById('uploadProgressBar').value = pct;
+                var progEl = document.getElementById('uploadProgress');
+                progEl.innerHTML = formatUploadProgress(uploadedBytes, file.size) + ' (' + pct + '%)';
+                console.log('[upload] 청크 ' + (p + 1) + ' 완료, 진행률:', pct + '%');
+              });
+          })(pi));
+        }
+        await Promise.all(batch);
+        partIndex = batchEnd;
       }
+
       console.log('[upload] complete 요청...');
       var compRes = await api('/api/files/chunked/' + uploadId + '/complete?fileId=' + fileId, {
         method: 'POST',
@@ -546,6 +573,7 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
       console.log('[upload] complete 데이터:', JSON.stringify(compData));
       if (!compData.success) throw new Error('완료 실패: ' + (compData.error && compData.error.message || ''));
       console.log('[upload] 청크 업로드 완료:', file.name);
+      hideProgressBar();
     }
 
     async function uploadOneFile(file, idx, total) {
