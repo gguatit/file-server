@@ -1,8 +1,6 @@
-import type { R2Bucket, R2Object, R2MultipartUpload } from '@cloudflare/workers-types'
+import type { R2Bucket, R2Object } from '@cloudflare/workers-types'
 import { FILE_RETENTION_HOURS, MAX_FILENAME_LENGTH } from '../schemas/files'
 import type { FileMetadata, PaginatedList } from '../lib/types'
-
-const multipartStore = new Map<string, R2MultipartUpload>()
 
 export function generateFileId(): string {
   return crypto.randomUUID()
@@ -82,22 +80,32 @@ export async function initMultipartUpload(
 
   if (!mpu) return null
 
-  multipartStore.set(key + ':' + mpu.uploadId, mpu)
+  await bucket.put(`${key}.parts`, JSON.stringify([]))
+
   return { uploadId: mpu.uploadId }
 }
 
 export async function uploadMultipartPart(
+  bucket: R2Bucket,
   key: string,
   uploadId: string,
   partNumber: number,
   body: ArrayBuffer,
 ): Promise<boolean> {
-  const id = key + ':' + uploadId
-  let mpu = multipartStore.get(id)
-  if (!mpu) return false
+  const mpu = bucket.resumeMultipartUpload(key, uploadId)
 
   try {
-    await mpu.uploadPart(partNumber, body)
+    const part = await mpu.uploadPart(partNumber, body)
+
+    const partsObj = await bucket.get(`${key}.parts`)
+    let parts: Array<{ partNumber: number; etag: string }> = []
+    if (partsObj) {
+      const text = await new Response(partsObj.body).text()
+      parts = JSON.parse(text)
+    }
+    parts.push({ partNumber: part.partNumber, etag: part.etag })
+    await bucket.put(`${key}.parts`, JSON.stringify(parts))
+
     return true
   } catch {
     return false
@@ -105,32 +113,24 @@ export async function uploadMultipartPart(
 }
 
 export async function completeMultipartUpload(
+  bucket: R2Bucket,
   key: string,
   uploadId: string,
 ): Promise<R2Object | null> {
-  const id = key + ':' + uploadId
-  const mpu = multipartStore.get(id)
-  if (!mpu) return null
+  const mpu = bucket.resumeMultipartUpload(key, uploadId)
 
   try {
-    const obj = await mpu.complete([])
-    multipartStore.delete(id)
+    const partsObj = await bucket.get(`${key}.parts`)
+    if (!partsObj || !partsObj.body) return null
+
+    const text = await new Response(partsObj.body).text()
+    const parts: Array<{ partNumber: number; etag: string }> = JSON.parse(text)
+
+    const obj = await mpu.complete(parts)
+    await bucket.delete(`${key}.parts`)
     return obj
   } catch {
     return null
-  }
-}
-
-export function getMultipartUpload(uploadId: string, key: string): R2MultipartUpload | undefined {
-  return multipartStore.get(key + ':' + uploadId)
-}
-
-export function abortMultipartUpload(uploadId: string, key: string): void {
-  const id = key + ':' + uploadId
-  const mpu = multipartStore.get(id)
-  if (mpu) {
-    mpu.abort().catch(() => {})
-    multipartStore.delete(id)
   }
 }
 

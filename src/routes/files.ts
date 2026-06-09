@@ -649,7 +649,7 @@ app.on(['POST'], '/api/files/chunked/:uploadId/part', cors(), rateLimit(), async
     return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'fileId 쿼리 파라미터가 필요합니다.' } }, 400)
   }
 
-  const ok = await uploadMultipartPart(fileId, uploadId, partNumber, arrayBuffer)
+  const ok = await uploadMultipartPart(c.env.FILE_BUCKET, fileId, uploadId, partNumber, arrayBuffer)
   if (!ok) {
     return c.json({ success: false, error: { code: 'INTERNAL_ERROR', message: '청크 업로드 실패' } }, 500)
   }
@@ -667,7 +667,7 @@ app.on(['POST'], '/api/files/chunked/:uploadId/complete', cors(), rateLimit(), a
     return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'uploadId와 fileId가 필요합니다.' } }, 400)
   }
 
-  const obj = await completeMultipartUpload(fileId, uploadId)
+  const obj = await completeMultipartUpload(c.env.FILE_BUCKET, fileId, uploadId)
   if (!obj) {
     return c.json({ success: false, error: { code: 'INTERNAL_ERROR', message: '업로드 완료 처리 실패' } }, 500)
   }
