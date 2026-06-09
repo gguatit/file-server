@@ -79,9 +79,6 @@ export async function initMultipartUpload(
   })
 
   if (!mpu) return null
-
-  await bucket.put(`${key}.parts`, JSON.stringify([]))
-
   return { uploadId: mpu.uploadId }
 }
 
@@ -91,24 +88,13 @@ export async function uploadMultipartPart(
   uploadId: string,
   partNumber: number,
   body: ReadableStream,
-): Promise<boolean> {
+): Promise<{ etag: string } | null> {
   const mpu = bucket.resumeMultipartUpload(key, uploadId)
-
   try {
     const part = await mpu.uploadPart(partNumber, body)
-
-    const partsObj = await bucket.get(`${key}.parts`)
-    let parts: Array<{ partNumber: number; etag: string }> = []
-    if (partsObj) {
-      const text = await new Response(partsObj.body).text()
-      parts = JSON.parse(text)
-    }
-    parts.push({ partNumber: part.partNumber, etag: part.etag })
-    await bucket.put(`${key}.parts`, JSON.stringify(parts))
-
-    return true
+    return { etag: part.etag }
   } catch {
-    return false
+    return null
   }
 }
 
@@ -116,19 +102,11 @@ export async function completeMultipartUpload(
   bucket: R2Bucket,
   key: string,
   uploadId: string,
+  parts: Array<{ partNumber: number; etag: string }>,
 ): Promise<R2Object | null> {
   const mpu = bucket.resumeMultipartUpload(key, uploadId)
-
   try {
-    const partsObj = await bucket.get(`${key}.parts`)
-    if (!partsObj || !partsObj.body) return null
-
-    const text = await new Response(partsObj.body).text()
-    const parts: Array<{ partNumber: number; etag: string }> = JSON.parse(text)
-
-    const obj = await mpu.complete(parts)
-    await bucket.delete(`${key}.parts`)
-    return obj
+    return await mpu.complete(parts)
   } catch {
     return null
   }

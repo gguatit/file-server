@@ -645,13 +645,13 @@ app.on(['POST'], '/api/files/chunked/:uploadId/part', cors(), rateLimit(), async
   }
 
   console.log('[chunked-part] uploadId:', uploadId, 'fileId:', fileId, 'partNumber:', partNumber)
-  const ok = await uploadMultipartPart(c.env.FILE_BUCKET, fileId, uploadId, partNumber, body)
-  if (!ok) {
+  const result = await uploadMultipartPart(c.env.FILE_BUCKET, fileId, uploadId, partNumber, body)
+  if (!result) {
     console.error('[chunked-part] uploadMultipartPart failed')
     return c.json({ success: false, error: { code: 'INTERNAL_ERROR', message: '청크 업로드 실패' } }, 500)
   }
 
-  return c.json({ success: true, data: { part: partNumber, uploaded: true } }, 200)
+  return c.json({ success: true, data: { part: partNumber, etag: result.etag } }, 200)
 })
 
 app.on(['POST'], '/api/files/chunked/:uploadId/complete', cors(), rateLimit(), async (c) => {
@@ -659,13 +659,22 @@ app.on(['POST'], '/api/files/chunked/:uploadId/complete', cors(), rateLimit(), a
   if (authErr) return authErr as any
 
   const uploadId = c.req.param('uploadId')
-  const fileId = c.req.query('fileId') || ''
-  if (!uploadId || !fileId) {
-    return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'uploadId와 fileId가 필요합니다.' } }, 400)
+
+  let body: { fileId?: string; parts?: Array<{ partNumber: number; etag: string }> } = {}
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'JSON 본문이 필요합니다.' } }, 400)
   }
 
-  console.log('[chunked-complete] uploadId:', uploadId, 'fileId:', fileId)
-  const obj = await completeMultipartUpload(c.env.FILE_BUCKET, fileId, uploadId)
+  const fileId = body.fileId || ''
+  const parts = body.parts || []
+  if (!uploadId || !fileId || !parts.length) {
+    return c.json({ success: false, error: { code: 'VALIDATION_ERROR', message: 'uploadId, fileId, parts가 필요합니다.' } }, 400)
+  }
+
+  console.log('[chunked-complete] uploadId:', uploadId, 'fileId:', fileId, 'parts:', parts.length)
+  const obj = await completeMultipartUpload(c.env.FILE_BUCKET, fileId, uploadId, parts)
   if (!obj) {
     console.error('[chunked-complete] completeMultipartUpload failed')
     return c.json({ success: false, error: { code: 'INTERNAL_ERROR', message: '업로드 완료 처리 실패' } }, 500)
