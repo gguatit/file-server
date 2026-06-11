@@ -35,7 +35,72 @@ const app = new OpenAPIHono<{ Bindings: Env }>()
 app.use('*', cors())
 app.use('*', rateLimit())
 
-app.get('/', (c) => c.redirect('/api/docs'))
+app.get('/', (c) => {
+  const html = `<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>파일 서버 API</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: #0d1117; color: #c9d1d9; min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 24px; }
+    .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 40px; max-width: 560px; width: 100%; }
+    h1 { font-size: 22px; color: #f0f6fc; margin-bottom: 4px; }
+    h2 { font-size: 13px; color: #8b949e; font-weight: 400; margin-bottom: 20px; }
+    .section { margin-bottom: 20px; }
+    .section h3 { font-size: 14px; color: #f0f6fc; margin-bottom: 8px; }
+    .section p, .section li { font-size: 13px; color: #8b949e; line-height: 1.6; }
+    .section ul { list-style: none; padding: 0; }
+    .section li::before { content: '- '; }
+    code { background: #21262d; padding: 1px 6px; border-radius: 3px; font-size: 12px; color: #79c0ff; }
+    a { color: #58a6ff; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .btn { display: inline-block; padding: 8px 16px; background: #238636; border: none; border-radius: 4px; color: #fff; font-size: 13px; cursor: pointer; text-decoration: none; margin-top: 12px; }
+    .btn:hover { background: #2ea043; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>파일 서버 API</h1>
+    <h2>Cloudflare Workers + R2 기반</h2>
+    <div class="section">
+      <h3>사용 방법</h3>
+      <p>API 키 또는 관리자 토큰을 <code>Authorization: Bearer &lt;key&gt;</code> 헤더로 전송하세요.</p>
+    </div>
+    <div class="section">
+      <h3>엔드포인트</h3>
+      <ul>
+        <li><code>POST /api/files</code> — 파일 업로드</li>
+        <li><code>POST /api/files/chunked/init</code> — 대용량 청크 업로드 시작</li>
+        <li><code>GET /api/files/:id</code> — 파일 다운로드</li>
+        <li><code>GET /api/files/:id/info</code> — 파일 정보</li>
+        <li><code>DELETE /api/files/:id</code> — 파일 삭제</li>
+        <li><code>GET /api/dl/:token</code> — 공유 링크 다운로드</li>
+        <li><code>GET /api/health</code> — 서버 상태 확인</li>
+      </ul>
+    </div>
+    <div class="section">
+      <h3>문서</h3>
+      <p><a href="/api/docs">API 문서 (Scalar)</a>에서 전체 OpenAPI 명세를 확인할 수 있습니다.</p>
+      <p><a href="/admin/login">관리자 로그인</a></p>
+    </div>
+    <div class="section">
+      <h3>제한 사항</h3>
+      <ul>
+        <li>파일당 최대 250MB</li>
+        <li>보관 기간: 업로드 후 24시간</li>
+        <li>속도 제한: IP당 분당 60회</li>
+        <li>CORS 허용: <a href="https://kalpha.mmv.kr">kalpha.mmv.kr</a></li>
+      </ul>
+    </div>
+  </div>
+</body>
+</html>`
+  c.header('Cache-Control', 'public, max-age=300')
+  c.header('X-Content-Type-Options', 'nosniff')
+  return c.html(html)
+})
 
 const listRoute = createRoute({
   method: 'get',
