@@ -1,4 +1,5 @@
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi'
+import { HTTPException } from 'hono/http-exception'
 import type { Env, ApiResponse, FileMetadata, PaginatedList } from '../lib/types'
 import { BLOCKED_MIME_TYPES, MAX_FILENAME_LENGTH, SINGLE_UPLOAD_MAX_SIZE, FILE_RETENTION_HOURS } from '../schemas/files'
 import {
@@ -676,7 +677,37 @@ app.openapi(healthRoute, async (c) => {
   return c.json({ status: 'ok' as const, r2: r2Status, uptime: Math.floor(Date.now() / 1000) }, 200)
 })
 
-app.on(['POST'], '/api/files/chunked/init', cors(), rateLimit(), async (c) => {
+const chunkedInitRoute = createRoute({
+  method: 'post',
+  path: '/api/files/chunked/init',
+  tags: ['청크 업로드'],
+  summary: '청크 업로드 초기화',
+  description: '멀티파트 업로드를 시작하고 uploadId를 발급합니다. part 업로드 후 complete를 호출하세요.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    body: {
+      content: {
+        'application/json': {
+          schema: z.object({
+            filename: z.string().describe('원본 파일명 (최대 512자)'),
+            totalSize: z.number().int().positive().describe('전체 파일 크기(바이트), 최대 250MB'),
+            contentType: z.string().optional().describe('MIME 타입 (기본 application/octet-stream)'),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { content: { 'application/json': { schema: z.object({ success: z.literal(true), data: z.object({ uploadId: z.string(), fileId: z.string() }) }) } }, description: '초기화 성공' },
+    400: { content: { 'application/json': { schema: errorResponseSchema } }, description: '잘못된 요청' },
+    401: { content: { 'application/json': { schema: errorResponseSchema } }, description: '인증 실패' },
+    413: { content: { 'application/json': { schema: errorResponseSchema } }, description: '파일 크기 초과 (최대 250MB)' },
+    429: { content: { 'application/json': { schema: errorResponseSchema } }, description: '요청 초과 (분당 60회 제한)' },
+    500: { content: { 'application/json': { schema: errorResponseSchema } }, description: '초기화 실패' },
+  },
+})
+
+app.openapi(chunkedInitRoute, async (c) => {
   const authErr = await checkAuth(c, false)
   if (authErr) return authErr as any
 
@@ -714,7 +745,35 @@ app.on(['POST'], '/api/files/chunked/init', cors(), rateLimit(), async (c) => {
   return c.json({ success: true, data: { uploadId: result.uploadId, fileId } }, 200)
 })
 
-app.on(['POST'], '/api/files/chunked/:uploadId/part', cors(), rateLimit(), async (c) => {
+const chunkedPartRoute = createRoute({
+  method: 'post',
+  path: '/api/files/chunked/:uploadId/part',
+  tags: ['청크 업로드'],
+  summary: '청크(파트) 업로드',
+  description: '멀티파트 업로드의 개별 파트를 바이너리 본문으로 전송합니다. 응답의 etag를 모아 complete에 전달하세요.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ uploadId: z.string() }),
+    query: z.object({
+      partNumber: z.coerce.number().int().positive().describe('파트 번호 (1부터 시작)'),
+      fileId: z.string().describe('init에서 발급받은 fileId'),
+    }),
+    body: {
+      content: {
+        'application/octet-stream': { schema: z.string().openapi({ format: 'binary' }) },
+      },
+    },
+  },
+  responses: {
+    200: { content: { 'application/json': { schema: z.object({ success: z.literal(true), data: z.object({ part: z.number(), etag: z.string() }) }) } }, description: '파트 업로드 성공' },
+    400: { content: { 'application/json': { schema: errorResponseSchema } }, description: '잘못된 요청' },
+    401: { content: { 'application/json': { schema: errorResponseSchema } }, description: '인증 실패' },
+    429: { content: { 'application/json': { schema: errorResponseSchema } }, description: '요청 초과 (분당 60회 제한)' },
+    500: { content: { 'application/json': { schema: errorResponseSchema } }, description: '파트 업로드 실패' },
+  },
+})
+
+app.openapi(chunkedPartRoute, async (c) => {
   const authErr = await checkAuth(c, false)
   if (authErr) return authErr as any
 
@@ -744,7 +803,36 @@ app.on(['POST'], '/api/files/chunked/:uploadId/part', cors(), rateLimit(), async
   return c.json({ success: true, data: { part: partNumber, etag: result.etag } }, 200)
 })
 
-app.on(['POST'], '/api/files/chunked/:uploadId/complete', cors(), rateLimit(), async (c) => {
+const chunkedCompleteRoute = createRoute({
+  method: 'post',
+  path: '/api/files/chunked/:uploadId/complete',
+  tags: ['청크 업로드'],
+  summary: '청크 업로드 완료',
+  description: '파트 목록으로 멀티파트 업로드를 완료합니다. 완료 시점부터 보관 기간 24시간이 적용됩니다.',
+  security: [{ bearerAuth: [] }],
+  request: {
+    params: z.object({ uploadId: z.string() }),
+    body: {
+      content: {
+        'application/json': {
+          schema: z.object({
+            fileId: z.string().describe('init에서 발급받은 fileId'),
+            parts: z.array(z.object({ partNumber: z.number().int().positive(), etag: z.string() })).min(1).describe('part 응답의 partNumber/etag 목록'),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    201: { content: { 'application/json': { schema: z.object({ success: z.literal(true), data: fileMetadataSchema }) } }, description: '업로드 완료' },
+    400: { content: { 'application/json': { schema: errorResponseSchema } }, description: '잘못된 요청' },
+    401: { content: { 'application/json': { schema: errorResponseSchema } }, description: '인증 실패' },
+    429: { content: { 'application/json': { schema: errorResponseSchema } }, description: '요청 초과 (분당 60회 제한)' },
+    500: { content: { 'application/json': { schema: errorResponseSchema } }, description: '업로드 완료 처리 실패' },
+  },
+})
+
+app.openapi(chunkedCompleteRoute, async (c) => {
   const authErr = await checkAuth(c, false)
   if (authErr) return authErr as any
 
@@ -789,6 +877,19 @@ app.on(['POST'], '/api/files/chunked/:uploadId/complete', cors(), rateLimit(), a
 configureOpenApi(app)
 
 app.onError((err, c) => {
+  // zod validator가 던지는 400 (예: 잘못된 JSON 본문)은 그대로 전달한다
+  if (err instanceof HTTPException && err.status < 500) {
+    return c.json(
+      {
+        success: false,
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: err.message === 'Malformed JSON in request body' ? 'JSON 본문이 올바르지 않습니다.' : err.message,
+        },
+      },
+      err.status,
+    )
+  }
   console.error('Unhandled error:', err)
   return c.json(
     {

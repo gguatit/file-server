@@ -4,6 +4,14 @@ import type { Env } from './types'
 import { adminApiAuth, adminPageAuth } from '../middleware/admin-auth'
 
 export function configureOpenApi(app: OpenAPIHono<{ Bindings: Env }>) {
+  // app.doc()의 components 설정은 무시되므로 레지스트리에 직접 등록해야 Scalar 인증 패널이 뜬다
+  app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', {
+    type: 'http',
+    scheme: 'bearer',
+    bearerFormat: 'API Key',
+    description: 'API_KEY 또는 관리자 토큰을 Bearer 토큰으로 전송하세요.',
+  })
+
   app.use('/api/openapi', adminApiAuth())
 
   app.doc('/api/openapi', {
@@ -23,10 +31,6 @@ export function configureOpenApi(app: OpenAPIHono<{ Bindings: Env }>) {
         '- 속도 제한: IP당 분당 60회 요청',
         '- CORS: https://kalpha.mmv.kr 및 동일 출처만 허용',
         '',
-        '## 차단된 파일 형식',
-        '',
-        '- 제한 없음 (모든 파일 형식 허용)',
-        '',
         '## 권한 체계',
         '',
         '- API_KEY: 파일 업로드 및 다운로드만 가능',
@@ -41,17 +45,13 @@ export function configureOpenApi(app: OpenAPIHono<{ Bindings: Env }>) {
         description: '운영 서버',
       },
     ],
-    components: {
-      securitySchemes: {
-        bearerAuth: {
-          type: 'http',
-          scheme: 'bearer',
-          bearerFormat: 'API Key',
-          description: 'API_KEY 또는 관리자 토큰을 Bearer 토큰으로 전송하세요.',
-        },
-      },
-    },
-  } as any)
+    tags: [
+      { name: '파일', description: '파일 업로드/다운로드/목록/삭제/공유' },
+      { name: '청크 업로드', description: '대용량(최대 250MB) 파일 멀티파트 업로드' },
+      { name: '통계', description: '버킷 통계' },
+      { name: '시스템', description: '헬스 체크' },
+    ],
+  })
 
   app.use('/api/docs', adminPageAuth())
 
