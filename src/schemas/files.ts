@@ -2,6 +2,8 @@ import { z } from 'zod'
 
 export const FILE_RETENTION_HOURS = 24
 export const MAX_UPLOAD_SIZE = 262144000
+// ponytail: single POST body is buffered in Worker memory; 50MB is the safe ceiling before Workers' 128MB limit
+export const SINGLE_UPLOAD_MAX_SIZE = 50 * 1024 * 1024
 export const MAX_FILENAME_LENGTH = 512
 
 export const BLOCKED_MIME_TYPES: string[] = []

@@ -695,16 +695,15 @@ const dashboardHTML = (token: string) => `<!DOCTYPE html>
     }
 
     async function extendFile(id) {
-      var hours = prompt('연장할 시간 (최대 168시간):', '24');
-      if (!hours) return;
+      if (!confirm('만료 시각을 지금부터 24시간 뒤로 리셋할까요?')) return;
       try {
         var res = await api('/api/files/' + id + '/extend', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ hours: parseInt(hours, 10) || 24 }),
+          body: JSON.stringify({ hours: 24 }),
         });
         var data = await res.json();
-        if (data.success) { showToast('만료 시간 ' + hours + '시간 연장됨', 'success'); refresh(); }
+        if (data.success) { showToast('만료 시각이 24시간 뒤로 연장되었습니다.', 'success'); refresh(); }
         else { showToast('연장 실패: ' + (data.error && data.error.message || '오류'), 'error'); }
       } catch (e) {
         showToast('연장 실패', 'error');

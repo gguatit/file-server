@@ -27,7 +27,7 @@ export const cors = (): MiddlewareHandler<{ Bindings: Env }> => {
       c.res.headers.set('Access-Control-Allow-Origin', isSameOrigin ? origin : allowedOrigin)
       c.res.headers.set(
         'Access-Control-Allow-Methods',
-        'GET, POST, DELETE, OPTIONS',
+        'GET, POST, PUT, DELETE, OPTIONS',
       )
       c.res.headers.set(
         'Access-Control-Allow-Headers',

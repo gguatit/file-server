@@ -1,6 +1,6 @@
 import { OpenAPIHono, createRoute, z } from '@hono/zod-openapi'
 import type { Env, ApiResponse, FileMetadata, PaginatedList } from '../lib/types'
-import { BLOCKED_MIME_TYPES, MAX_FILENAME_LENGTH } from '../schemas/files'
+import { BLOCKED_MIME_TYPES, MAX_FILENAME_LENGTH, SINGLE_UPLOAD_MAX_SIZE, FILE_RETENTION_HOURS } from '../schemas/files'
 import {
   fileMetadataSchema,
   fileListDataSchema,
@@ -18,6 +18,7 @@ import {
   deleteFile,
   listFiles,
   generateFileId,
+  computeExpireAt,
   initMultipartUpload,
   uploadMultipartPart,
   completeMultipartUpload,
@@ -34,6 +35,12 @@ const app = new OpenAPIHono<{ Bindings: Env }>()
 
 app.use('*', cors())
 app.use('*', rateLimit())
+
+function isExpired(expireAt: string | undefined): boolean {
+  if (!expireAt) return false
+  const t = Date.parse(expireAt)
+  return Number.isFinite(t) && t < Date.now()
+}
 
 app.get('/', (c) => {
   const html = `<!DOCTYPE html>
@@ -88,7 +95,7 @@ app.get('/', (c) => {
     <div class="section">
       <h3>제한 사항</h3>
       <ul>
-        <li>파일당 최대 250MB</li>
+        <li>단일 업로드 최대 50MB / 청크 업로드 최대 250MB</li>
         <li>보관 기간: 업로드 후 24시간</li>
         <li>속도 제한: IP당 분당 60회</li>
         <li>CORS 허용: <a href="https://kalpha.mmv.kr">kalpha.mmv.kr</a></li>
@@ -293,7 +300,7 @@ const uploadRoute = createRoute({
   path: '/api/files',
   tags: ['파일'],
   summary: '파일 업로드',
-  description: 'multipart/form-data로 파일을 업로드합니다. 최대 250MB까지 허용됩니다. API_KEY 또는 관리자 토큰이 필요합니다.',
+  description: 'multipart/form-data로 파일을 업로드합니다. 단일 요청은 최대 50MB까지이며, 더 큰 파일(최대 250MB)은 청크 업로드 API를 사용하세요. API_KEY 또는 관리자 토큰이 필요합니다.',
   security: [{ bearerAuth: [] }],
   request: {
     body: {
@@ -323,7 +330,7 @@ const uploadRoute = createRoute({
     },
     413: {
       content: { 'application/json': { schema: errorResponseSchema } },
-      description: '파일 크기 초과 (최대 250MB)',
+      description: '파일 크기 초과 (단일 업로드 최대 50MB, 청크 업로드 최대 250MB)',
     },
     415: {
       content: { 'application/json': { schema: errorResponseSchema } },
@@ -344,6 +351,17 @@ app.openapi(uploadRoute, async (c) => {
   const authErr = await checkAuth(c, false)
   if (authErr) return authErr as any
 
+  const chunkedMaxSize = parseInt(c.env.MAX_UPLOAD_SIZE || '262144000', 10)
+  const tooLargeMessage = `단일 업로드는 최대 ${Math.round(SINGLE_UPLOAD_MAX_SIZE / 1024 / 1024)}MB까지 허용됩니다. 더 큰 파일은 청크 업로드(POST /api/files/chunked/init, 최대 ${Math.round(chunkedMaxSize / 1024 / 1024)}MB)를 사용하세요.`
+
+  const contentLength = parseInt(c.req.header('Content-Length') || '0', 10) || 0
+  if (contentLength > SINGLE_UPLOAD_MAX_SIZE + 1024 * 1024) {
+    return c.json(
+      { success: false, error: { code: 'FILE_TOO_LARGE', message: tooLargeMessage } },
+      413,
+    )
+  }
+
   const formData = await c.req.formData()
   const file = formData.get('file') as File | null
 
@@ -354,11 +372,9 @@ app.openapi(uploadRoute, async (c) => {
     )
   }
 
-  const maxUploadSize = parseInt(c.env.MAX_UPLOAD_SIZE || '262144000', 10)
-
-  if (file.size > maxUploadSize) {
+  if (file.size > SINGLE_UPLOAD_MAX_SIZE) {
     return c.json(
-      { success: false, error: { code: 'FILE_TOO_LARGE', message: `파일 크기는 최대 ${Math.round(maxUploadSize / 1024 / 1024)}MB까지 허용됩니다. 현재 크기: ${(file.size / 1024 / 1024).toFixed(2)}MB` } },
+      { success: false, error: { code: 'FILE_TOO_LARGE', message: tooLargeMessage } },
       413,
     )
   }
@@ -378,9 +394,8 @@ app.openapi(uploadRoute, async (c) => {
   }
 
   const fileId = generateFileId()
-  const buffer = await file.arrayBuffer()
 
-  const metadata = await uploadFile(c.env.FILE_BUCKET, fileId, buffer, {
+  const metadata = await uploadFile(c.env.FILE_BUCKET, fileId, file.stream(), {
     originalFilename: file.name,
     contentType: file.type || undefined,
   })
@@ -442,8 +457,14 @@ app.openapi(downloadRoute, async (c) => {
   }
 
   const { body, obj } = result
-  const contentType = obj.httpMetadata?.contentType ?? 'application/octet-stream'
   const custom = obj.customMetadata ?? {}
+  if (isExpired(custom.expireAt as string | undefined)) {
+    return c.json(
+      { success: false as const, error: { code: 'FILE_NOT_FOUND', message: '파일을 찾을 수 없습니다. (보관 기간 만료)' } },
+      404,
+    )
+  }
+  const contentType = obj.httpMetadata?.contentType ?? 'application/octet-stream'
   const originalFilename = (custom.originalFilename as string) || id
   const asciiFilename = originalFilename.replace(/[^\x20-\x7E]/g, '_')
 
@@ -469,11 +490,11 @@ const extendRoute = createRoute({
   path: '/api/files/:id/extend',
   tags: ['파일'],
   summary: '파일 만료 시간 연장 (관리자 전용)',
-  description: '파일의 만료 시간을 지정한 시간만큼 연장합니다. 관리자 토큰이 필요합니다.',
+  description: '파일 만료 시각을 현재 시각 + 24시간으로 리셋합니다. R2 수명주기 정책이 객체 나이 기준이므로 실제 연장은 항상 24시간이며, hours 값은 하위 호환을 위해 받기만 합니다. 관리자 토큰이 필요합니다.',
   security: [{ bearerAuth: [] }],
   request: {
     params: z.object({ id: z.string() }),
-    body: { content: { 'application/json': { schema: z.object({ hours: z.number().int().min(1).max(168) }) } } },
+    body: { content: { 'application/json': { schema: z.object({ hours: z.number().int().min(1).max(168).describe('하위 호환용. 실제 연장 시간은 항상 24시간입니다.') }) } } },
   },
   responses: {
     200: { content: { 'application/json': { schema: z.object({ success: z.literal(true), data: extendDataSchema }) } }, description: '연장 성공' },
@@ -496,9 +517,7 @@ app.openapi(extendRoute, async (c) => {
   }
 
   const custom = obj.customMetadata ?? {}
-  const currentExpireAt = (custom.expireAt as string) || obj.uploaded.toISOString()
-  const newExpire = new Date(new Date(currentExpireAt).getTime() + hours * 60 * 60 * 1000)
-  const newExpireAt = newExpire.toISOString()
+  const newExpireAt = computeExpireAt().toISOString()
 
   const r2Body = await getFileBody(c.env.FILE_BUCKET, id)
   if (!r2Body) {
@@ -511,7 +530,7 @@ app.openapi(extendRoute, async (c) => {
   })
 
   const ip = c.req.header('CF-Connecting-IP') || 'unknown'
-  logEvent('extend', ip, { fileId: id, details: `${hours}h` })
+  logEvent('extend', ip, { fileId: id, details: `reset to ${FILE_RETENTION_HOURS}h (requested ${hours}h)` })
 
   return c.json({ success: true as const, data: { id, newExpireAt, extended: true } }, 200)
 })
@@ -586,8 +605,14 @@ app.openapi(shareDownloadRoute, async (c) => {
   }
 
   const { body, obj } = result
-  const contentType = obj.httpMetadata?.contentType ?? 'application/octet-stream'
   const custom = obj.customMetadata ?? {}
+  if (isExpired(custom.expireAt as string | undefined)) {
+    return c.json(
+      { success: false as const, error: { code: 'FILE_NOT_FOUND', message: '파일을 찾을 수 없습니다. (보관 기간 만료)' } },
+      404,
+    )
+  }
+  const contentType = obj.httpMetadata?.contentType ?? 'application/octet-stream'
   const originalFilename = (custom.originalFilename as string) || payload.fileId
   const asciiFilename = originalFilename.replace(/[^\x20-\x7E]/g, '_')
 

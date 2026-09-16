@@ -23,25 +23,26 @@ Cloudflare Workers + R2 기반 파일 서버. 파일 업로드, 다운로드, 24
                      업로드 시 메타데이터 기록
                      (originalFilename, uploadedAt, expireAt)
 
-Cron (12시간 간격) -> cleanupExpiredFiles
-                      -> expireAt < 현재시간 인 파일 삭제
+R2 수명주기 규칙 -> 객체 나이 24시간 경과 시 자동 삭제
+                    (미완료 멀티파트 업로드는 7일 후 abort)
 ```
 
 ### 파일 생명 주기
 
-1. 클라이언트가 `POST /api/files`로 파일 업로드 (multipart/form-data)
-2. 서버가 UUID 파일 ID 생성, R2에 저장하며 `expireAt` 메타데이터 기록 (업로드 + 24시간)
-3. 클라이언트는 파일 ID를 받아 다운로드 URL 구성
-4. 12시간마다 Cron Worker가 만료된 파일 자동 삭제
+1. 클라이언트가 `POST /api/files`로 파일 업로드 (multipart/form-data, 최대 50MB)
+2. 50MB 초과 파일은 청크 업로드 API 사용 (`POST /api/files/chunked/init` -> `/part` -> `/complete`, 최대 250MB)
+3. 서버가 UUID 파일 ID 생성, R2에 저장하며 `expireAt` 메타데이터 기록 (업로드 + 24시간)
+4. R2 수명주기 규칙이 객체 나이 24시간 경과 시 자동 삭제 (Worker Cron 아님)
+5. 관리자 연장(`PUT /api/files/:id/extend`)은 객체를 다시 쓰는 방식이라 나이가 리셋되어 만료 시각이 현재 + 24시간이 됩니다 (`hours` 값과 무관)
 
 ### 디렉토리 구조
 
 ```
 src/
-  index.ts          # Worker 진입점 (fetch + scheduled)
+  index.ts          # Worker 진입점 (fetch)
   app.ts            # Hono 앱 조립
   routes/
-    files.ts        # 파일 CRUD API 라우트
+    files.ts        # 파일 API 라우트 (업로드/청크/다운로드/공유/연장/통계)
     admin.ts        # 관리자 페이지 라우트
   middleware/
     auth.ts         # API 인증 (API_KEY + 관리자 토큰)
@@ -49,9 +50,10 @@ src/
     cors.ts         # CORS 처리
     rate-limit.ts   # IP 기반 속도 제한
   services/
-    r2.ts           # R2 버킷 작업 (업로드/다운로드/삭제/목록)
-    admin.ts        # 관리자 로그인/토큰 관리 (HMAC-SHA256)
-    cleanup.ts      # 만료 파일 정리
+    r2.ts           # R2 버킷 작업 (업로드/다운로드/삭제/목록/멀티파트)
+    admin.ts        # 관리자 로그인/토큰 관리 (PBKDF2 + HMAC-SHA256)
+    stats.ts        # 버킷 통계 (isolate 로컬 60초 캐시)
+    logger.ts       # 구조화 JSON 로그
   schemas/
     files.ts        # Zod 스키마 및 상수
   lib/
@@ -85,11 +87,12 @@ src/
 
 - **CORS**: `kalpha.mmv.kr` 및 동일 출처 요청만 허용
 - **속도 제한**: IP당 분당 60회
-- **파일 크기 제한**: 250MB
-- **MIME 차단**: text/html, application/x-httpd-php 등 실행 가능한 파일 형식 차단
+- **파일 크기 제한**: 단일 업로드 50MB, 청크 업로드 합계 250MB
+- **MIME 제한**: 없음 (모든 파일 형식 허용)
 - **파일 키**: UUID v4 자동 생성으로 경로 추측 불가
 - **다운로드 헤더**: `Content-Disposition: attachment` 강제, `X-Content-Type-Options: nosniff`
-- **관리자 비밀번호**: SHA-256 해시로만 저장, 평문은 코드 어디에도 없음
+- **만료 검사**: 다운로드 시 `expireAt` 경과 파일은 404 반환
+- **관리자 비밀번호**: PBKDF2-SHA256 (10만 회) 해시로 저장, 레거시 SHA-256 해시도 검증 지원
 - **관리자 토큰**: HMAC-SHA256 서명, 12시간 만료, httpOnly + Secure + SameSite=Strict 쿠키
 
 ## 환경 변수
@@ -101,30 +104,25 @@ src/
 | `ADMIN_ID` | 관리자 로그인 아이디 | `kalpha` |
 | `ADMIN_PW_HASH` | 관리자 비밀번호 SHA-256 해시 (생성 방법은 아래 참고) | - |
 | `ALLOWED_ORIGIN` | CORS 허용 출처 | `https://kalpha.mmv.kr` |
-| `MAX_UPLOAD_SIZE` | 파일당 최대 업로드 크기 (바이트) | `262144000` |
+| `MAX_UPLOAD_SIZE` | 청크 업로드 기준 전체 최대 크기 (바이트) | `262144000` |
 | `RATE_LIMIT_PER_MINUTE` | IP당 분당 요청 제한 | `60` |
 
 ### Secret으로 설정하는 변수
 
 ```bash
 wrangler secret put API_KEY
+wrangler secret put ADMIN_TOKEN_SECRET
 ```
 
-`API_KEY`는 파일 업로드/다운로드를 위한 키입니다. `wrangler.toml`에 평문으로 넣지 말고 반드시 secret으로 설정하세요.
+`API_KEY`는 파일 업로드/다운로드를 위한 키입니다. `ADMIN_TOKEN_SECRET`은 관리자 토큰(JWT) 서명 키입니다. 둘 다 `wrangler.toml`에 평문으로 넣지 말고 반드시 secret으로 설정하세요.
 
 ### ADMIN_PW_HASH 생성 방법
 
-다음 Node.js 스크립트로 해시를 생성합니다.
-
-```js
-const crypto = require('crypto')
-const password = '원하는_비밀번호'
-const salt = 'file-server-admin-salt'
-const hash = crypto.createHash('sha256').update(password + salt).digest('hex')
-console.log(hash)
+```bash
+npx tsx scripts/hash-pbkdf2.ts '원하는_비밀번호'
 ```
 
-생성된 해시 값을 `wrangler.toml`의 `ADMIN_PW_HASH`에 설정합니다.
+출력된 `pbkdf2:100000:...` 값을 `wrangler.toml`의 `ADMIN_PW_HASH`에 설정합니다. 기존 SHA-256 해시가 설정되어 있어도 동작합니다 (PBKDF2 우선 검증, 실패 시 레거시 SHA-256 검증).
 
 ## API 사용법
 
@@ -209,7 +207,7 @@ curl -X DELETE https://file.kalpha.kr/api/files/a1b2c3d4-... \
 | `UNAUTHORIZED` | 401 | 인증 실패 |
 | `FORBIDDEN` | 403 | 관리자 권한 필요 |
 | `FILE_NOT_FOUND` | 404 | 파일이 존재하지 않음 |
-| `FILE_TOO_LARGE` | 413 | 250MB 초과 |
+| `FILE_TOO_LARGE` | 413 | 단일 업로드 50MB 초과 (청크 업로드 사용) |
 | `INVALID_FILE_TYPE` | 415 | 차단된 파일 형식 |
 | `VALIDATION_ERROR` | 400 | 요청 형식 오류 |
 | `RATE_LIMITED` | 429 | 속도 제한 초과 |
@@ -220,10 +218,10 @@ curl -X DELETE https://file.kalpha.kr/api/files/a1b2c3d4-... \
 1. [https://file.kalpha.kr/admin/login](https://file.kalpha.kr/admin/login) 접속
 2. 관리자 아이디와 비밀번호 입력
 3. 대시보드 기능:
-   - 저장된 파일 목록 및 파일 크기 확인
-   - 다운로드 URL 클립보드 복사
-   - 파일 개별 삭제
-   - 페이지네이션 (20개 단위)
+   - 파일 목록/검색, 통계 카드, 페이지네이션 (20/50/100)
+   - 드래그 앤 드롭 다중 업로드 (10MB 초과 시 자동 청크 업로드)
+   - 선택 삭제, 다운로드 URL 복사, 공유 링크 생성, 만료 연장(+24시간 리셋)
+   - 파일 상세 정보 모달 (이미지 미리보기 포함)
    - API 문서 바로가기 (`/api/docs`)
 
 로그인 세션은 12시간 유지되며, 이후 자동 만료됩니다.
@@ -257,9 +255,12 @@ npx wrangler deploy
 
 ## 제한 사항
 
-- 파일당 최대 크기: 250MB
-- 보관 기간: 업로드 시점부터 24시간
-- 자동 삭제: Cron 트리거로 12시간마다 실행 (KST 오전 9시, 오후 9시)
-- 속도 제한: IP당 분당 60회
-- 차단 MIME 타입: `text/html`, `application/x-httpd-php`, `application/x-msdownload`, `application/x-msdos-program`, `application/x-java-archive`
+- 단일 업로드 최대 크기: 50MB
+- 청크 업로드 최대 크기: 250MB
+- 보관 기간: 객체 나이 기준 24시간
+- 자동 삭제: R2 수명주기 규칙 (Worker Cron 아님, 미완료 멀티파트는 7일 후 abort)
+- 만료 연장: 관리자 전용, 현재 시각 + 24시간으로 리셋 (`hours` 값 무관)
+- 만료 파일 다운로드: 404 반환
+- 속도 제한: IP당 분당 60회 (isolate 메모리 기반, 콜드 스타트 시 초기화)
+- MIME 제한: 없음
 - R2 저장소 최대 10GB
